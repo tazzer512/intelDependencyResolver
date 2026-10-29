@@ -5,6 +5,13 @@ The section of the current `pluginVersion` becomes the plugin's change notes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+### Added
+- Versioning: `pluginVersion` in `gradle.properties`, this changelog as the plugin's change notes, and the
+  `bumpVersion` and `bup` Gradle tasks.
+- Ready-built plugin zips per version in `bup/`.
+
 ## [0.1.0] - 2026-10-29
 
 ### Added
