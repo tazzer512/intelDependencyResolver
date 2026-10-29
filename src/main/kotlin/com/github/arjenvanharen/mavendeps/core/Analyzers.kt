@@ -137,10 +137,7 @@ object DependencyVersionValidator : PomAnalyzer {
         val g = ws.interpolate(context, dep.groupId)
         val a = ws.interpolate(context, dep.artifactId)
         val v = ws.interpolate(context, dep.version)
-        return ws.entries.keys.firstOrNull { p ->
-            val gav = ws.model(p)!!.effectiveGav
-            ws.interpolate(p, gav.groupId) == g && gav.artifactId == a && Workspace.versionsMatch(ws.interpolate(p, gav.version), v)
-        }
+        return ws.pomsWithGa(g, a).firstOrNull { p -> Workspace.versionsMatch(ws.interpolate(p, ws.model(p)!!.effectiveGav.version), v) }
     }
 }
 
@@ -167,7 +164,8 @@ object PropertyValidator : PomAnalyzer {
         return model.propertyRefs
             .filter { !isBuiltin(it.name) && it.name !in props && it.name !in profileProps && it.name !in descendantProps }
             .map {
-                val fixes = listOfNotNull(
+                // A reference like ${a b} cannot become an element; offering it would write malformed XML.
+                val fixes = if (!PomParser.isElementName(it.name)) emptyList() else listOfNotNull(
                     DefineProperty("Define property '${it.name}' in this POM…", null, it.name, null),
                     top?.let { t -> DefineProperty("Define property '${it.name}' in root POM ${ws.model(t)!!.effectiveGav.ga}…", t, it.name, null) },
                 )

@@ -207,6 +207,11 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
             counter.reused++
             return cached
         }
+        if (size > PomParser.MAX_BYTES) {
+            counter.parsed++
+            val problem = Problem(Severity.ERROR, Category.XML_SYNTAX, "File is too large to analyse ($size bytes; the limit is ${PomParser.MAX_BYTES})", Pos.NONE)
+            return PomEntry(path, size, mtime, "", PomModel.EMPTY, listOf(problem))
+        }
         val bytes = try {
             Files.readAllBytes(path)
         } catch (e: IOException) {

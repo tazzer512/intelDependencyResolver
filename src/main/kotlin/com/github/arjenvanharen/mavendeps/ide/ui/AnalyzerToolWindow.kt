@@ -191,10 +191,13 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         val base = project.basePath?.let { Path.of(it) }
         val visited = HashSet<Path>()
 
+        // Memoized: the check is asked for every node of the module tree.
+        val withProblems = HashMap<Path, Boolean>()
         fun hasProblems(path: Path, seen: MutableSet<Path>): Boolean {
+            withProblems[path]?.let { return it }
             if (!seen.add(path)) return false
             val r = result.poms[path] ?: return false
-            return r.problems.isNotEmpty() || r.modules.any { hasProblems(it, seen) }
+            return (r.problems.isNotEmpty() || r.modules.any { hasProblems(it, seen) }).also { withProblems[path] = it }
         }
 
         fun build(path: Path): DefaultMutableTreeNode? {
@@ -225,9 +228,14 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
     /** One fix per distinct suggestion; the same suggestion is reported on every declaration it touches. */
     private fun suggestionFixes(): List<Pair<Path, QuickFix>> {
         val result = MavenAnalysisService.getInstance(project).lastResult ?: return emptyList()
+        // Asked by the toolbar on every update; computed once per analysis.
+        suggestionCache?.takeIf { it.first === result }?.let { return it.second }
         return result.poms.values.flatMap { r -> r.problems.filter { it.category == Category.SUGGESTIONS }.flatMap { p -> p.fixes.take(1).map { r.path to it } } }
             .distinctBy { it.second }
+            .also { suggestionCache = result to it }
     }
+
+    private var suggestionCache: Pair<AnalysisResult, List<Pair<Path, QuickFix>>>? = null
 
     private fun showFixes(at: RelativePoint? = null) {
         val node = selectedProblem() ?: return

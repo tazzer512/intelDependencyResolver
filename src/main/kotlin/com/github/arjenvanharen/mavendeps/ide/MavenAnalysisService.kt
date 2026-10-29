@@ -18,9 +18,11 @@ import com.intellij.openapi.application.readAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.platform.ide.progress.withBackgroundProgress
+import com.intellij.psi.PsiManager
 import com.intellij.platform.util.progress.RawProgressReporter
 import com.intellij.platform.util.progress.reportRawProgress
 import com.intellij.util.messages.Topic
@@ -110,7 +112,14 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
         scope.launch {
             for (ignored in trigger) {
                 delay(DEBOUNCE_MS)
-                runPending()
+                // Whatever one refresh throws, later saves must still be analysed.
+                try {
+                    runPending()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    LOG.error("Maven POM analysis failed", e)
+                }
             }
         }
     }
@@ -121,26 +130,27 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
     /** A resolver over the last analysed workspace, for one query. */
     fun resolver(): DependencyResolver = DependencyResolver(engine.workspaceSnapshot(), repository)
 
-    /** The last analysed workspace. */
+    /** The last analysed workspace, as a new snapshot; use [resolver]'s `ws` when a query needs both. */
     fun workspace(): Workspace = engine.workspaceSnapshot()
 
     /** Version hints of the last analysis, computed per POM on first use; one resolver shares its cache for all of them. */
     private class Insights(val result: AnalysisResult, val resolver: DependencyResolver) {
-        val hints = HashMap<Path, List<VersionHint>>()
+        val hints = HashMap<Path, List<Pair<VersionHint, String>>>()
     }
 
     @Volatile
     private var insights: Insights? = null
 
-    /** The version hints for a workspace POM, or null when it was not analysed. Reads `~/.m2`; call off the EDT. */
-    fun versionHints(path: Path): List<VersionHint>? {
+    /** The version hints with their labels for a workspace POM, or null when it was not analysed. Reads `~/.m2`; call off the EDT. */
+    fun versionHints(path: Path): List<Pair<VersionHint, String>>? {
         val result = lastResult ?: return null
         if (result.poms[path]?.model?.wellFormed != true) return null
         val current = insights?.takeIf { it.result === result } ?: Insights(result, resolver()).also { insights = it }
         return synchronized(current) {
             current.hints.getOrPut(path) {
                 try {
-                    VersionHints.forPom(current.resolver.ws, current.resolver, repository, path)
+                    val ws = current.resolver.ws
+                    VersionHints.forPom(ws, current.resolver, repository, path).mapNotNull { h -> h.label(ws)?.let { h to it } }
                 } catch (e: Exception) {
                     LOG.warn("Could not compute version hints for $path", e)
                     emptyList()
@@ -224,13 +234,19 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
             val files = engine.knownPaths + engine.missingPaths
             watch = Watch(files, files.flatMapTo(HashSet()) { generateSequence(it.parent) { p -> p.parent }.asIterable() })
             project.messageBus.syncPublisher(MavenAnalysisListener.TOPIC).analysisUpdated(result)
-            // Open POM editors show problems and version hints from the analysis.
-            ApplicationManager.getApplication().invokeLater({ DaemonCodeAnalyzer.getInstance(project).restart("Maven analysis updated") }, project.disposed)
+            // Open POM editors show problems and version hints from the analysis; other editors are not affected.
+            ApplicationManager.getApplication().invokeLater({ restartPomHighlighting() }, project.disposed)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             LOG.warn("Maven POM analysis failed", e)
         }
+    }
+
+    private fun restartPomHighlighting() {
+        val psi = PsiManager.getInstance(project)
+        val daemon = DaemonCodeAnalyzer.getInstance(project)
+        FileEditorManager.getInstance(project).openFiles.filter { it.name == "pom.xml" }.forEach { vf -> psi.findFile(vf)?.let { daemon.restart(it) } }
     }
 
     /** Passes engine progress to the IDE progress indicator and, throttled and never going backwards, to the inline bars. */

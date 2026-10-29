@@ -188,7 +188,9 @@ internal class GraphPanel(private val project: Project, parent: Disposable) : Si
             "Building Maven module graph",
             { progress ->
                 progress.report(null, "Building module graph")
-                GraphData(result, ModuleGraph.build(service.workspace(), service.resolver(), progress))
+                // One snapshot for both: an analysis finishing in between must not mix two workspaces.
+                val resolver = service.resolver()
+                GraphData(result, ModuleGraph.build(resolver.ws, resolver, progress))
             },
             onProgress = { progress.job(it) },
             onFailure = {
@@ -227,7 +229,7 @@ internal class GraphPanel(private val project: Project, parent: Disposable) : Si
         val warnings = r?.problems?.count { it.severity == Severity.WARNING } ?: 0
         val parent = g.outgoing(path, setOf(EdgeKind.PARENT)).firstOrNull()?.let { name(it.to) }
         status.text = buildString {
-            append("<html><b>${StringUtil.escapeXmlEntities(name(path))}</b> ${gav?.groupId}:${gav?.version}")
+            append("<html><b>${StringUtil.escapeXmlEntities(name(path))}</b> ${StringUtil.escapeXmlEntities("${gav?.groupId}:${gav?.version}")}")
             append(" · needs: ${StringUtil.escapeXmlEntities(list(g.outgoing(path, setOf(EdgeKind.DEPENDENCY))) { it.to })}")
             append(" · used by: ${StringUtil.escapeXmlEntities(list(g.incoming(path, setOf(EdgeKind.DEPENDENCY))) { it.from })}")
             parent?.let { append(" · parent: ${StringUtil.escapeXmlEntities(it)}") }

@@ -406,7 +406,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         val version = c.version ?: (s as? LibraryItem)?.library?.versions?.lastOrNull() ?: return false
         val pom = artifactPom(c.groupId, c.artifactId, version)
         if (pom == null) {
-            status.text = "${c.groupId}:${c.artifactId}:$version is not in ${service.repository.root}"
+            status.text = "Not in ${service.repository.root}: ${c.groupId}:${c.artifactId}:$version"
             return false
         }
         return open(pom, 1)
@@ -414,7 +414,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
 
     private fun artifactPom(groupId: String, artifactId: String, version: String): Path? =
         loaded?.resolver?.workspacePom(groupId, artifactId, version)
-            ?: service.repository.pomPath(groupId, artifactId, version).takeIf { Files.isRegularFile(it) }
+            ?: service.repository.pomPath(groupId, artifactId, version)?.takeIf { Files.isRegularFile(it) }
 
     /**
      * Where the selected dependency is declared: the module POM (or its parent) for a direct dependency, otherwise the
@@ -444,9 +444,9 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         val c = selectedCoordinates() ?: return
         val scope = selectedNode()?.second?.scope?.takeIf { it != "compile" }
         val xml = buildString {
-            append("<dependency>\n    <groupId>${c.groupId}</groupId>\n    <artifactId>${c.artifactId}</artifactId>\n")
-            c.version?.let { append("    <version>$it</version>\n") }
-            scope?.let { append("    <scope>$it</scope>\n") }
+            append("<dependency>\n    <groupId>${esc(c.groupId)}</groupId>\n    <artifactId>${esc(c.artifactId)}</artifactId>\n")
+            c.version?.let { append("    <version>${esc(it)}</version>\n") }
+            scope?.let { append("    <scope>${esc(it)}</scope>\n") }
             append("</dependency>")
         }
         CopyPasteManager.getInstance().setContents(StringSelection(xml))

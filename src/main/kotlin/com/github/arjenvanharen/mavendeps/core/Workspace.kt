@@ -117,6 +117,13 @@ class Workspace(val entries: Map<Path, PomEntry>) {
             .groupBy({ it.first }, { it.second })
     }
 
+    private val byInterpolatedGa: Map<String, List<Path>> by lazy {
+        entries.keys.groupBy { p -> model(p)!!.effectiveGav.let { "${interpolate(p, it.groupId)}:${interpolate(p, it.artifactId)}" } }
+    }
+
+    /** Workspace POMs whose fully interpolated coordinates are [groupId]:[artifactId]. */
+    fun pomsWithGa(groupId: String?, artifactId: String?): List<Path> = byInterpolatedGa["$groupId:$artifactId"].orEmpty()
+
     /** POMs inheriting from [path], directly or indirectly. */
     fun descendants(path: Path): Set<Path> {
         val result = LinkedHashSet<Path>()
@@ -166,6 +173,8 @@ class Workspace(val entries: Map<Path, PomEntry>) {
     }
 
     companion object {
+        private const val MAX_INTERPOLATED_LENGTH = 64 * 1024
+
         fun pomPath(p: Path): Path {
             val normalized = p.toAbsolutePath().normalize()
             return if (normalized.fileName?.toString()?.endsWith(".xml") == true) normalized else normalized.resolve("pom.xml")
@@ -180,6 +189,8 @@ class Workspace(val entries: Map<Path, PomEntry>) {
                     val replacement = props[name] ?: continue
                     result = result.replace("\${$name}", replacement)
                     changed = true
+                    // Self-amplifying definitions (a = ${b}${b}, b = ${c}${c}, ...) must not exhaust memory.
+                    if (result.length > MAX_INTERPOLATED_LENGTH) return result
                 }
                 if (!changed) return result
             }

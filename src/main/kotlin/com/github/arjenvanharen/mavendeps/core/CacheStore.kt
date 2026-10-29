@@ -18,6 +18,7 @@ import java.util.zip.GZIPOutputStream
 object CacheStore {
     private const val MAGIC = 0x4D444143 // "MDAC"
     private const val VERSION = 3
+    private const val MAX_ITEMS = 1_000_000
 
     fun write(file: Path, entries: Collection<PomEntry>) {
         Files.createDirectories(file.parent)
@@ -40,7 +41,7 @@ object CacheStore {
         return try {
             DataInputStream(BufferedInputStream(GZIPInputStream(Files.newInputStream(file)))).use { input ->
                 if (input.readInt() != MAGIC || input.readInt() != VERSION) return emptyList()
-                List(input.readInt()) { input.readEntry() }
+                List(bounded(input.readInt(), MAX_ITEMS)) { input.readEntry() }
             }
         } catch (_: Exception) {
             emptyList()
@@ -247,7 +248,10 @@ object CacheStore {
         write(bytes)
     }
 
-    private fun DataInputStream.readStr(): String = String(readNBytes(readInt()), Charsets.UTF_8)
+    private fun DataInputStream.readStr(): String = String(readNBytes(bounded(readInt(), PomParser.MAX_BYTES)), Charsets.UTF_8)
+
+    /** Sizes come from a file that may be corrupt; an absurd one must fail the read, not allocate gigabytes. */
+    private fun bounded(n: Int, max: Int): Int = if (n in 0..max) n else throw java.io.IOException("Corrupt cache: size $n")
 
     private fun DataOutputStream.writeNullable(s: String?) {
         writeBoolean(s != null)
@@ -261,5 +265,5 @@ object CacheStore {
         items.forEach { writeItem(it) }
     }
 
-    private fun <T> DataInputStream.readList(readItem: DataInputStream.() -> T): List<T> = List(readInt()) { readItem() }
+    private fun <T> DataInputStream.readList(readItem: DataInputStream.() -> T): List<T> = List(bounded(readInt(), MAX_ITEMS)) { readItem() }
 }

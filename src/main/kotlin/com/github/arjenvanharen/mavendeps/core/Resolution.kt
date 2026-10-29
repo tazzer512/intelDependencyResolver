@@ -15,17 +15,33 @@ class LocalRepository(val root: Path) {
 
     private val cache = ConcurrentHashMap<Path, Cached>()
 
-    fun pomPath(groupId: String, artifactId: String, version: String): Path =
-        root.resolve(groupId.replace('.', '/')).resolve(artifactId).resolve(version).resolve("$artifactId-$version.pom")
+    /**
+     * The directory of an artifact, or null when the coordinates are not usable as path segments. They come from
+     * (possibly untrusted) POMs, so `..`, separators and expressions are rejected and the result must stay under [root].
+     */
+    private fun artifactDir(groupId: String, artifactId: String): Path? {
+        val segments = groupId.split('.') + artifactId
+        if (segments.any { !isSafeSegment(it) }) return null
+        return segments.fold(root) { dir, s -> dir.resolve(s) }.normalize().takeIf { it.startsWith(root.normalize()) }
+    }
+
+    private fun isSafeSegment(s: String) =
+        s.isNotEmpty() && s != "." && s != ".." && s.none { it == '/' || it == '\\' || it == ':' || it.isISOControl() } && "\${" !in s
+
+    /** Where the POM of an artifact lives, or null when the coordinates cannot name a file in the repository. */
+    fun pomPath(groupId: String, artifactId: String, version: String): Path? {
+        if (!isSafeSegment(version)) return null
+        return artifactDir(groupId, artifactId)?.resolve(version)?.resolve("$artifactId-$version.pom")
+    }
 
     fun pom(groupId: String, artifactId: String, version: String): PomModel? {
-        if (listOf(groupId, artifactId, version).any { it.isEmpty() || it.contains("\${") || it.contains('/') }) return null
-        val file = pomPath(groupId, artifactId, version)
+        val file = pomPath(groupId, artifactId, version) ?: return null
         val attrs = try {
             Files.readAttributes(file, BasicFileAttributes::class.java)
         } catch (_: Exception) {
             return null
         }
+        if (!attrs.isRegularFile || attrs.size() > PomParser.MAX_BYTES) return null
         val hit = cache[file]
         if (hit != null && hit.size == attrs.size() && hit.mtime == attrs.lastModifiedTime().toMillis()) return hit.model
         val model = try {
@@ -42,8 +58,7 @@ class LocalRepository(val root: Path) {
      * downloads (only `*.lastUpdated` files) are skipped.
      */
     fun versions(groupId: String, artifactId: String): List<String> {
-        if (groupId.isEmpty() || artifactId.isEmpty() || "\${" in groupId || "\${" in artifactId) return emptyList()
-        val dir = root.resolve(groupId.replace('.', '/')).resolve(artifactId)
+        val dir = artifactDir(groupId, artifactId) ?: return emptyList()
         val names = try {
             Files.list(dir).use { s -> s.filter { Files.isRegularFile(it.resolve("$artifactId-${it.fileName}.pom")) }.map { it.fileName.toString() }.toList() }
         } catch (_: Exception) {
@@ -101,8 +116,12 @@ class EffectiveModel(
     val managed: Map<String, ManagedDependency>,
     val dependencies: List<EffectiveDependency>,
 ) {
-    fun managedFor(groupId: String, artifactId: String): ManagedDependency? =
-        managed.entries.firstOrNull { it.key.startsWith("$groupId:$artifactId:") }?.value
+    /** The first managed entry per `groupId:artifactId`; BOMs like Spring Boot's manage over a thousand artifacts. */
+    private val byGa: Map<String, ManagedDependency> by lazy {
+        HashMap<String, ManagedDependency>().also { map -> managed.forEach { (key, md) -> map.putIfAbsent(key.split(':').take(2).joinToString(":"), md) } }
+    }
+
+    fun managedFor(groupId: String, artifactId: String): ManagedDependency? = byGa["$groupId:$artifactId"]
 }
 
 enum class NodeStatus { INCLUDED, OMITTED_DUPLICATE, OMITTED_CONFLICT }
@@ -326,7 +345,7 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
                 if (dep.optional || dep.scope == "test" || dep.scope == "provided" || dep.scope == "system") continue
                 if (node.exclusions.any { matches(it, dep) }) continue
                 // Cycles (e.g. a classifier artifact sharing its POM with the main artifact) are dropped, as in Maven.
-                if (node.chain.any { it.dependency.key == dep.key }) continue
+                if (generateSequence(node) { it.parent }.any { it.dependency.key == dep.key }) continue
                 val scope = when (node.scope) {
                     "test", "provided" -> node.scope
                     "runtime" -> "runtime"

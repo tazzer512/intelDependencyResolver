@@ -218,6 +218,7 @@ object FixApplier {
         }
 
         fun defineProperty(name: String, value: String) {
+            if (!PomParser.isElementName(name)) throw FixException("'$name' is not a valid property name")
             val props = root.child("properties")
             val existing = props?.child(name)
             if (existing != null) setChild(props, name, value) else append(root, "properties", "<$name>${esc(value)}</$name>")

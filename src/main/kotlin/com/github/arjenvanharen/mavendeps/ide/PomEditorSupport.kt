@@ -23,17 +23,29 @@ import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiFile
+import java.io.IOException
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * Finds the analysed POM behind an editor file. The analysis reads files from disk, so positions only match the
- * document while it has no unsaved changes; until it is saved again, nothing is shown.
+ * document while it has no unsaved changes and the analysis has seen the saved file; until then, nothing is shown.
  */
 private fun analysedPom(file: PsiFile): Path? {
     if (file.name != "pom.xml") return null
     val vf = file.virtualFile ?: return null
     if (!vf.isInLocalFileSystem || FileDocumentManager.getInstance().isFileModified(vf)) return null
-    return vf.toNioPath().toAbsolutePath().normalize()
+    val path = vf.toNioPath().toAbsolutePath().normalize()
+    val entry = MavenAnalysisService.getInstance(file.project).lastResult?.poms?.get(path)?.entry ?: return null
+    val current = try {
+        Files.readAttributes(path, BasicFileAttributes::class.java)
+    } catch (_: IOException) {
+        return null
+    }
+    // Saved, but not analysed yet (debounce or analysis still running): the positions would be off.
+    if (current.size() != entry.size || current.lastModifiedTime().toMillis() != entry.lastModified) return null
+    return path
 }
 
 /** The document offset of an analysis position, or null when it is outside the document. */
@@ -109,9 +121,7 @@ class VersionInlayProvider : InlayHintsProvider {
                 val hints = service.versionHints(path) ?: return
                 val doc = editor.document
                 val text = doc.charsSequence.toString()
-                val ws = service.workspace()
-                for (h in hints) {
-                    val label = h.label(ws) ?: continue
+                for ((h, label) in hints) {
                     val start = doc.offsetOf(h.dependency.pos) ?: continue
                     val tooltip = buildString {
                         append("${h.groupId}:${h.artifactId}")

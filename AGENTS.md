@@ -57,6 +57,7 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 - **Resolution matches Maven** for common cases. Mediation is nearest-wins, BFS, first declaration wins. test/provided/optional dependencies are not transitive. Exclusions use `*` wildcards. The module's dependencyManagement overrides transitive versions. Cycles are dropped. Profiles are activated by activeByDefault, os, jdk and property. Version ranges, relocations and file activation are not supported. This was verified identical to `mvn dependency:tree` on a real project.
 - **Pasted snippets**: the first dependency fills the fields. Comments and `<exclusions>` are ignored, and incomplete XML is accepted. A `${prop}` version is used only when every workspace POM resolves it to the same value; otherwise the version is left empty.
 - **Local versions**: `LocalRepository.versions` lists only version directories with a POM (failed downloads are skipped). Newer versions skip pre-releases unless the current version is one.
+- **Untrusted input** (`HardeningTest`): POMs and `~/.m2` content may be crafted. Repository paths are built only from safe segments and stay under the repository root (`LocalRepository.pomPath` returns null otherwise). POMs over `PomParser.MAX_BYTES` or nested deeper than `MAX_DEPTH` are reported, not parsed. Cache sizes are bounded. Interpolation output is capped. Property fixes require a valid element name. POM text in Swing `<html>` labels is always escaped.
 - **Version update** never selects "declare directly" by default. Exclusions go on the direct dependency that brings the transitive copy in, which may be declared in a parent. Modules whose dependencyManagement will force the new version need no exclusions.
 
 ## Conventions
@@ -66,5 +67,5 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 - Tests are JUnit 4 and use `Fixture` (temp workspace plus a fake `.m2`). `Fixture.pom()` uses 4-space indentation.
 - New problem types: give them `fixes` where an automatic fix is unambiguous. Use `SetChild(value = null)` or `DefineProperty(value = null)` to ask the user for a value.
 - Inside a Swing component, `ERROR`/`WARNING` and similar names resolve to `ImageObserver` int constants; give color constants distinct names.
-- After analysis the service restarts the daemon, so open POM editors refresh their annotations and inlay hints.
+- Editor annotations and hints are shown only when the analysed size/mtime match the file on disk. After analysis, only open `pom.xml` editors are restarted.
 - Edits only apply to saved content. The analysis reads files from disk, not unsaved editor documents.

@@ -32,6 +32,12 @@ class XNode(val name: String, val pos: Pos, val parent: XNode?) {
 class ParseResult(val root: XNode?, val model: PomModel, val problems: List<Problem>)
 
 object PomParser {
+    /** Larger files are not parsed; real POMs are a few hundred KB at most. */
+    const val MAX_BYTES = 16 * 1024 * 1024
+
+    /** Deeper nesting is reported as an error; it keeps the recursive tree walks safe from crafted files. */
+    const val MAX_DEPTH = 100
+
     private val factory: XMLInputFactory = XMLInputFactory.newDefaultFactory().apply {
         setProperty(XMLInputFactory.SUPPORT_DTD, false)
         setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false)
@@ -52,9 +58,11 @@ object PomParser {
             val reader = synchronized(factory) { open() }
             try {
                 var current: XNode? = null
+                var depth = 0
                 while (reader.hasNext()) {
                     when (reader.next()) {
                         XMLStreamConstants.START_ELEMENT -> {
+                            if (++depth > MAX_DEPTH) throw XMLStreamException("Elements are nested more than $MAX_DEPTH levels deep", reader.location)
                             val node = XNode(reader.localName, Pos(reader.location.lineNumber, reader.location.columnNumber), current)
                             for (i in 0 until reader.attributeCount) {
                                 node.attributes[reader.getAttributeLocalName(i)] = reader.getAttributeValue(i)
@@ -63,6 +71,7 @@ object PomParser {
                             current = node
                         }
                         XMLStreamConstants.END_ELEMENT -> {
+                            depth--
                             current?.endPos = Pos(reader.location.lineNumber, reader.location.columnNumber)
                             current = current?.parent
                         }
@@ -188,6 +197,10 @@ object PomParser {
         visit(root, true)
         return refs
     }
+
+    /** Whether [name] can be used as an element name, e.g. for a property (namespace prefixes are not allowed). */
+    fun isElementName(name: String): Boolean =
+        name.isNotEmpty() && (name[0].isLetter() || name[0] == '_') && name.all { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }
 
     /** Names referenced as `${name}` in [text]; nested expressions are skipped. */
     fun referencedProperties(text: String): List<String> {

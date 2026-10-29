@@ -13,9 +13,12 @@ data class GraphEdge(val from: Path, val to: Path, val kind: EdgeKind, val scope
 
 /** How the workspace POMs relate: module dependencies, parents and aggregation. */
 class ModuleGraph(val nodes: List<Path>, val edges: List<GraphEdge>) {
-    fun outgoing(node: Path, kinds: Set<EdgeKind> = EdgeKind.entries.toSet()) = edges.filter { it.from == node && it.kind in kinds }
+    private val bySource = edges.groupBy { it.from }
+    private val byTarget = edges.groupBy { it.to }
 
-    fun incoming(node: Path, kinds: Set<EdgeKind> = EdgeKind.entries.toSet()) = edges.filter { it.to == node && it.kind in kinds }
+    fun outgoing(node: Path, kinds: Set<EdgeKind> = EdgeKind.entries.toSet()) = bySource[node].orEmpty().filter { it.kind in kinds }
+
+    fun incoming(node: Path, kinds: Set<EdgeKind> = EdgeKind.entries.toSet()) = byTarget[node].orEmpty().filter { it.kind in kinds }
 
     companion object {
         /** Dependency edges use the effective model, so inherited dependencies and managed versions count. */
