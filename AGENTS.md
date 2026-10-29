@@ -52,7 +52,7 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 | `ide/ui/GraphPanel.kt` | "Graph" tab: custom-painted module graph in build order (what a module needs is below it). Hover highlights connections, Focus shows what a module needs and what needs it, drag nodes, pan/zoom/fit, filter, problem badges, legend. Resolves only while visible. |
 | `ide/ui/SecurityPanel.kt` | "Security" tab: scans on request (it sends g:a:v to osv.dev), vulnerable artifacts by severity with advisories and the modules/paths that bring them in, "Fix All" / per-artifact upgrade through `VersionAligner`, a stale banner after POM changes |
 | `ide/ui/PlanDialog.kt` | Review dialog for planned POM changes, plus `reviewAndApply` |
-| `ide/ui/DependencyPanel.kt` | "Dependencies" tab: find a dependency (declared / transitive / missing POMs), a paste box that fills the fields, and "Update Version…" (editable picker of local versions, newest first) with a review dialog. Implements `DependencyActions` for the Explorer. |
+| `ide/ui/DependencyPanel.kt` | "Dependencies" tab: find a dependency (declared / transitive / missing POMs), a paste box that fills the fields (each in a titled border), and "Update Version…" (editable picker of local versions, newest first) with a review dialog. Implements `DependencyActions` for the Explorer. |
 
 ## Invariants the tests lock in
 
@@ -70,6 +70,7 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 ## Conventions
 
 - Kotlin pitfall: `java.nio.file.Path` is `Iterable<Path>`. `set += path`, `list + path` and `setOf(...) + path` add path *segments*. Use `.add(path)` or `plusElement(path)`.
+- User-visible features are described in `README.md` (by tab) and in the `<description>` of `plugin.xml`. Update both when a feature changes. Each tab is one row in the Layout table above.
 - Keep `core/` free of IntelliJ imports. Put logic there with a unit test, and keep `ide/` as glue.
 - Tests are JUnit 4 and use `Fixture` (temp workspace plus a fake `.m2`). `Fixture.pom()` uses 4-space indentation.
 - New problem types: give them `fixes` where an automatic fix is unambiguous. Use `SetChild(value = null)` or `DefineProperty(value = null)` to ask the user for a value.
