@@ -14,6 +14,10 @@ import com.github.arjenvanharen.mavendeps.core.LibraryUsage
 import com.github.arjenvanharen.mavendeps.core.NodeStatus
 import com.github.arjenvanharen.mavendeps.core.PomResult
 import com.github.arjenvanharen.mavendeps.core.Severity
+import com.github.arjenvanharen.mavendeps.core.VersionAligner
+import com.github.arjenvanharen.mavendeps.core.VersionConflict
+import com.intellij.ui.EditorNotificationPanel
+import com.intellij.ui.InlineBanner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
 import com.github.arjenvanharen.mavendeps.ide.Navigation
@@ -104,6 +108,9 @@ private class Loaded(
     /** Versions in the local repository per groupId:artifactId, oldest first. */
     val local: Map<String, List<String>>,
 ) {
+    /** Conflicts that are not already resolved to the newest version, by groupId:artifactId. */
+    val conflicts: Map<String, VersionConflict> = VersionAligner.conflicts(libraries.values).associateBy { it.library.ga }
+
     /** The newest local version when it is newer than every version the workspace resolves. */
     fun newer(lib: Library): String? {
         val current = lib.versions.maxWithOrNull(MavenVersion.COMPARATOR) ?: return null
@@ -133,6 +140,12 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
     private val status = JBLabel()
     private val progress = InlineProgress(project, parent)
     private val filterAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, parent)
+    private val conflictBanner = InlineBanner(EditorNotificationPanel.Status.Warning).apply {
+        showCloseButton(false)
+        addAction("Show conflicts") { showConflicts() }
+        addAction("Resolve all to the newest version…") { resolveConflicts(loaded?.conflicts?.values?.toList().orEmpty()) }
+        isVisible = false
+    }
 
     private var view = View.MODULES
     private var showOmitted = true
@@ -171,7 +184,10 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         })
 
         val left = JPanel(BorderLayout())
-        left.add(filter, BorderLayout.NORTH)
+        left.add(JPanel(BorderLayout()).apply {
+            add(conflictBanner.apply { border = JBUI.Borders.empty(4) }, BorderLayout.NORTH)
+            add(filter, BorderLayout.SOUTH)
+        }, BorderLayout.NORTH)
         left.add(ScrollPaneFactory.createScrollPane(tree, true), BorderLayout.CENTER)
         val splitter = OnePixelSplitter(false, 0.62f)
         splitter.firstComponent = left
@@ -210,6 +226,17 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             add(toggle("Show Omitted Dependencies", "Show duplicates and versions that lost mediation", AllIcons.Actions.Show, { showOmitted }) { showOmitted = it })
             add(toggle("Hide Test and Provided Scopes", "Hide test and provided dependencies", AllIcons.Nodes.Test, { hideTestScopes }) { hideTestScopes = it })
             add(toggle("Only Version Conflicts", "Show only libraries that resolve to more than one version", AllIcons.General.Warning, { conflictsOnly }) { conflictsOnly = it })
+            add(object : DumbAwareAction(
+                "Resolve All Version Conflicts…",
+                "Align every conflicting library to the newest version found; review the changes before they are applied",
+                AllIcons.Actions.QuickfixBulb,
+            ) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = loaded?.conflicts?.isNotEmpty() == true
+                }
+                override fun actionPerformed(e: AnActionEvent) = resolveConflicts(loaded?.conflicts?.values?.toList().orEmpty())
+            })
             addSeparator()
             add(object : DumbAwareAction("Re-resolve", "Resolve all dependency trees again", AllIcons.Actions.Refresh) {
                 override fun actionPerformed(e: AnActionEvent) {
@@ -244,14 +271,17 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         Separator.getInstance(),
         action("Find Everywhere", "Search all POMs and transitive trees in the Dependencies tab", AllIcons.Actions.Find) { selectedCoordinates()?.let(actions::find) },
         action("Update Version…", "Update this dependency in every POM", AllIcons.Actions.Edit) { selectedCoordinates()?.let(actions::updateVersion) },
+        action("Resolve Version Conflict", "Use the newest version of this library in every module", AllIcons.Actions.QuickfixBulb, { selectedConflict() != null }) {
+            selectedConflict()?.let { resolveConflicts(listOf(it)) }
+        },
         action("Copy as <dependency>", "Copy a POM snippet for this dependency", AllIcons.Actions.Copy) { copySnippet() },
     )
 
-    private fun action(text: String, description: String, icon: javax.swing.Icon, run: () -> Unit): AnAction =
+    private fun action(text: String, description: String, icon: javax.swing.Icon, enabled: () -> Boolean = { selected() != null }, run: () -> Unit): AnAction =
         object : DumbAwareAction(text, description, icon) {
             override fun getActionUpdateThread() = ActionUpdateThread.EDT
             override fun update(e: AnActionEvent) {
-                e.presentation.isEnabled = selected() != null
+                e.presentation.isEnabledAndVisible = enabled()
             }
             override fun actionPerformed(e: AnActionEvent) = run()
         }
@@ -291,7 +321,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
     private fun passes(n: DependencyNode): Boolean =
         (showOmitted || n.status == NodeStatus.INCLUDED) &&
             (!hideTestScopes || n.scope !in setOf("test", "provided")) &&
-            (!conflictsOnly || loaded?.libraries?.get("${n.groupId}:${n.artifactId}")?.conflict == true)
+            (!conflictsOnly || loaded?.conflicts?.containsKey("${n.groupId}:${n.artifactId}") == true)
 
     private fun matches(text: String): Boolean {
         val f = filter.text.trim()
@@ -342,7 +372,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 data.result.roots.forEach { addModule(root, it) }
             }
             View.LIBRARIES -> {
-                val libs = data.libraries.values.filter { !conflictsOnly || it.conflict }.sortedWith(compareBy({ !it.conflict }, { it.ga }))
+                val libs = data.libraries.values.filter { !conflictsOnly || it.ga in data.conflicts }.sortedWith(compareBy({ it.ga !in data.conflicts }, { it.ga }))
                 for (lib in libs) {
                     val usages = lib.usages.filter { passes(it.node) }
                     if (usages.isEmpty()) continue
@@ -365,9 +395,16 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         everShown = true
 
         val libraries = data.libraries.values
-        val conflicts = libraries.count { it.conflict }
+        val open = data.conflicts.size
+        conflictBanner.isVisible = open > 0
+        if (open > 0) {
+            conflictBanner.setMessage(
+                "$open librar${if (open == 1) "y resolves" else "ies resolve"} to different versions in different modules. " +
+                    "Mixed versions can cause runtime errors such as NoSuchMethodError.",
+            )
+        }
         val missing = data.trees.values.flatMapTo(HashSet()) { it.missingPoms }.size
-        status.text = "${data.trees.size} modules · ${libraries.size} libraries · $conflicts with version conflicts" +
+        status.text = "${data.trees.size} modules · ${libraries.size} libraries · $open with version conflicts" +
             (if (missing > 0) " · $missing POMs missing from ${service.repository.root}" else "") +
             (if (filtering) " — $shown matching" else "")
         showDetails()
@@ -459,12 +496,60 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             "declaration" -> openDeclaration()
             "find" -> selectedCoordinates()?.let(actions::find)
             "update" -> selectedCoordinates()?.let(actions::updateVersion)
+            "resolve" -> selectedConflict()?.let { resolveConflicts(listOf(it)) }
             "copy" -> copySnippet()
-            "conflicts" -> {
-                view = View.LIBRARIES
-                conflictsOnly = true
-                rebuild()
+            "conflicts" -> showConflicts()
+        }
+    }
+
+    private fun showConflicts() {
+        view = View.LIBRARIES
+        conflictsOnly = true
+        rebuild()
+        TreeUtil.promiseSelectFirst(tree)
+    }
+
+    /** The open conflict of the selected library (or usage of a library). */
+    private fun selectedConflict(): VersionConflict? {
+        val ga = when (val s = selected()) {
+            is LibraryItem -> s.library.ga
+            is UsageItem -> "${s.usage.node.groupId}:${s.usage.node.artifactId}"
+            is DepItem -> "${s.node.groupId}:${s.node.artifactId}"
+            else -> return null
+        }
+        return loaded?.conflicts?.get(ga)
+    }
+
+    /** Plans aligning [conflicts] to their newest version, lets the user review the changes and applies them. */
+    private fun resolveConflicts(conflicts: List<VersionConflict>) {
+        if (conflicts.isEmpty()) {
+            status.text = "No version conflicts to resolve"
+            return
+        }
+        status.text = "Planning how to resolve ${conflicts.size} version conflict${if (conflicts.size == 1) "" else "s"}…"
+        service.runQuery(
+            "Planning version conflict resolution",
+            { p ->
+                val resolver = service.resolver()
+                VersionAligner.plan(resolver.ws, resolver, conflicts.map { it.request() }, p)
+            },
+            onProgress = { progress.job(it) },
+            onFailure = { status.text = "Planning failed: ${it.message}" },
+        ) { items ->
+            if (items.isEmpty()) {
+                status.text = "Nothing to change: the declarations already use the newest versions"
+                return@runQuery
             }
+            val single = conflicts.singleOrNull()
+            val title = if (single != null) "Resolve ${single.library.ga}: use ${single.target} everywhere" else "Resolve ${conflicts.size} version conflicts"
+            val list = conflicts.take(12).joinToString("<br>") { c ->
+                "&nbsp;&nbsp;• ${esc(c.library.ga)}: ${c.library.requestedVersions.joinToString(", ") { esc(it) }} → <b>${esc(c.target)}</b>"
+            } + if (conflicts.size > 12) "<br>&nbsp;&nbsp;… and ${conflicts.size - 12} more" else ""
+            val header = "<html>Each library is aligned to the newest version found in the workspace:<br>$list<br><br>" +
+                "Declarations (or the property they use) are updated. Modules that only get an older version transitively get the " +
+                "newest one pinned in &lt;dependencyManagement&gt; of their root POM. Versions are never lowered.</html>"
+            val applied = PlanDialog.reviewAndApply(project, title, header, items)
+            status.text = if (applied == null) "Resolving cancelled" else "Applied $applied change${if (applied == 1) "" else "s"}; the trees are resolved again after the analysis"
         }
     }
 
@@ -507,7 +592,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         val r = item.result
         val gav = r.model.effectiveGav
         val tree = item.tree
-        val conflicts = tree?.all()?.filter { data.libraries["${it.groupId}:${it.artifactId}"]?.conflict == true }?.map { it.artifactId }?.distinct()?.count() ?: 0
+        val conflicts = tree?.all()?.filter { "${it.groupId}:${it.artifactId}" in data.conflicts }?.map { it.artifactId }?.distinct()?.count() ?: 0
         val errors = r.problems.count { it.severity == Severity.ERROR }
         val warnings = r.problems.count { it.severity == Severity.WARNING }
         return buildString {
@@ -559,7 +644,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 val modules = lib.modules.size
                 val versions = lib.versions.joinToString(", ") { esc(it) }
                 append(row("In workspace", "$modules module${if (modules == 1) "" else "s"} · version${if (lib.versions.size == 1) "" else "s"} $versions" +
-                    if (lib.conflict) " <span style='color:red'>(conflict)</span>" else ""))
+                    if (lib.ga in data.conflicts) " <a href='resolve'><span style='color:red'>(conflict — resolve)</span></a>" else ""))
             }
             append("</table>")
             append(links("declaration" to "Go to declaration", "pom" to "Open POM", "find" to "Find everywhere", "update" to "Update version…", "copy" to "Copy as &lt;dependency&gt;"))
@@ -568,7 +653,9 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
     }
 
     private fun libraryDetails(data: Loaded, lib: Library): String = buildString {
-        append("<html><body><h3>${esc(lib.ga)}</h3><table>")
+        append("<html><body><h3>${esc(lib.ga)}</h3>")
+        if (lib.conflict) append(conflictSection(data, lib))
+        append("<table>")
         append(row("Resolved versions", lib.versions.joinToString(", ") { esc(it) }.ifEmpty { "<i>none (all omitted)</i>" }))
         if (lib.requestedVersions.size > lib.versions.size) append(row("Also requested", (lib.requestedVersions - lib.versions.toSet()).joinToString(", ") { esc(it) }))
         append(row("Declared directly", if (lib.declared) "yes" else "no, only transitively"))
@@ -587,9 +674,38 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             append(row(esc(version), usages.map { it.module }.distinct().joinToString(", ") { esc(moduleName(it)) }))
         }
         append("</table>")
-        if (lib.conflict) append("<p style='color:red'>Modules resolve different versions. Use <a href='update'>Update version…</a> to align them.</p>")
         append(links("pom" to "Open POM", "find" to "Find everywhere", "update" to "Update version…", "copy" to "Copy as &lt;dependency&gt;"))
         append("</body></html>")
+    }
+
+    /** Explains a version conflict in plain words: who gets which version, and the one-click way to resolve it. */
+    private fun conflictSection(data: Loaded, lib: Library): String = buildString {
+        val conflict = data.conflicts[lib.ga]
+        val newest = conflict?.target ?: VersionAligner.newest(lib.requestedVersions)
+        val warn = ColorUtil.toHex(JBColor.RED)
+        append("<table width='100%' cellpadding='6' style='border:1px solid #${ColorUtil.toHex(JBColor.border())}'><tr><td>")
+        if (conflict == null) {
+            append("<b>Several versions are requested, but this is already resolved.</b><br>")
+            append("Every module uses ${esc(newest)}, the newest version; the older versions that other dependencies ask for are left out by Maven.")
+        } else {
+            append("<b style='color:#$warn'>⚠ Version conflict</b><br>")
+            append("Not all modules use the same version of this library. A module can get an older version than its neighbours, ")
+            append("and mixing versions can cause runtime errors such as NoSuchMethodError.<br><br>")
+            append("<table cellpadding='2'>")
+            val byVersion = lib.usages.filter { it.node.status == NodeStatus.INCLUDED && it.node.version != null }.groupBy { it.node.version!! }
+            for ((version, usages) in byVersion.entries.sortedByDescending { MavenVersion(it.key) }) {
+                val label = if (version == newest) "<b>${esc(version)}</b> (newest)" else "<span style='color:#$warn'>${esc(version)}</span>"
+                val who = usages.distinctBy { it.module }.joinToString(", ") { u ->
+                    esc(moduleName(u.module)) + if (u.node.depth == 1) " (declared)" else " (via ${esc(u.node.direct.artifactId)})"
+                }
+                append("<tr><td valign='top'>$label</td><td>$who</td></tr>")
+            }
+            append("</table><br>")
+            append("<a href='resolve'><b>Use ${esc(newest)} everywhere</b></a> &nbsp;·&nbsp; <a href='update'>Choose another version…</a><br>")
+            append("<span style='color:gray'>Updates the declarations of this library and pins ${esc(newest)} in &lt;dependencyManagement&gt; ")
+            append("for modules that only get it transitively. You review every change before it is applied.</span>")
+        }
+        append("</td></tr></table><br>")
     }
 
     // ---- rendering ----
@@ -614,10 +730,16 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 is UsageItem -> renderNode(data.usage.node, data.usage.module)
                 is LibraryItem -> {
                     val lib = data.library
-                    icon = if (lib.conflict) AllIcons.General.Warning else AllIcons.Nodes.PpLib
+                    icon = if (loaded?.conflicts?.containsKey(lib.ga) == true) AllIcons.General.Warning else AllIcons.Nodes.PpLib
                     append("${lib.groupId}:", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     append(lib.artifactId, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-                    append("  " + lib.versions.joinToString(", ").ifEmpty { "omitted" }, if (lib.conflict) SimpleTextAttributes.ERROR_ATTRIBUTES else SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    val conflict = loaded?.conflicts?.get(lib.ga)
+                    if (conflict != null) {
+                        append("  ${lib.versions.size} versions: " + lib.versions.joinToString(", "), SimpleTextAttributes.ERROR_ATTRIBUTES)
+                        append("  → use ${conflict.target}", SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES)
+                    } else {
+                        append("  " + lib.versions.joinToString(", ").ifEmpty { "omitted" }, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                    }
                     val modules = lib.modules.size
                     append("  $modules module${if (modules == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     if (!lib.declared) append("  transitive only", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)

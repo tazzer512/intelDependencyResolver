@@ -17,6 +17,10 @@
             <li>Problems and quick fixes right in the pom.xml editor, and inlay hints with the effective version of managed
                 and property versions, plus newer versions already in the local repository.</li>
             <li>Graph: an interactive module graph in build order with dependency, parent and aggregation edges.</li>
+            <li>Version conflicts explained per library, and resolved in one step: every conflicting library is aligned to the
+                newest version found (declarations updated, transitive-only modules pinned in dependencyManagement).</li>
+            <li>Security: scan all direct and transitive dependencies for known vulnerabilities (CVEs, GitHub advisories) via
+                osv.dev, and upgrade vulnerable libraries to their fixed versions. Only coordinates are sent, and only on request.</li>
         </ul>
         Open the <b>Maven Analyzer</b> tool window; use <i>Full Refresh</i> to discard the cache.
     ]]></description>

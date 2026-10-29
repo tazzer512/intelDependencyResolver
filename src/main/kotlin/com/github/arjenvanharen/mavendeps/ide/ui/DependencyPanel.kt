@@ -7,23 +7,21 @@ import com.github.arjenvanharen.mavendeps.core.DependencySearch
 import com.github.arjenvanharen.mavendeps.core.DependencySection
 import com.github.arjenvanharen.mavendeps.core.DependencySnippet
 import com.github.arjenvanharen.mavendeps.core.NodeStatus
-import com.github.arjenvanharen.mavendeps.core.PlanItem
 import com.github.arjenvanharen.mavendeps.core.Pos
 import com.github.arjenvanharen.mavendeps.core.SearchResult
 import com.github.arjenvanharen.mavendeps.core.TransitiveHit
 import com.github.arjenvanharen.mavendeps.core.VersionUpdatePlanner
-import com.github.arjenvanharen.mavendeps.ide.FixRunner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
 import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
-import com.intellij.ui.CheckBoxList
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.DoubleClickListener
+import com.intellij.ui.IdeBorderFactory
+import com.intellij.ui.JBColor
 import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLabel
@@ -39,7 +37,6 @@ import java.awt.event.KeyEvent
 import java.awt.event.MouseEvent
 import java.nio.file.Path
 import javax.swing.JButton
-import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JTree
 import javax.swing.event.DocumentEvent
@@ -88,6 +85,7 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         listOf(groupField, artifactField, versionField).forEach { it.addKeyListener(enter) }
 
         val form = JPanel(FlowLayout(FlowLayout.LEFT, 4, 2))
+        form.border = IdeBorderFactory.createTitledBorder("Find or update a dependency", false, JBUI.insets(4, 4, 0, 4))
         form.add(groupField)
         form.add(JBLabel(":"))
         form.add(artifactField)
@@ -96,16 +94,17 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         form.add(JButton("Find", AllIcons.Actions.Find).apply { addActionListener { search() } })
         form.add(JButton("Update Version…", AllIcons.Actions.Edit).apply { addActionListener { updateVersion() } })
 
-        pasteArea.emptyText.text = "Paste a <dependency> snippet, groupId:artifactId:version or a dependency:tree line to fill the fields"
+        pasteArea.emptyText.text = "Paste here to fill the fields above, e.g. <dependency>…</dependency> or com.google.guava:guava:33.0.0-jre"
         pasteArea.font = JBUI.Fonts.create(java.awt.Font.MONOSPACED, pasteArea.font.size)
         pasteArea.document.addDocumentListener(object : DocumentAdapter() {
             override fun textChanged(e: DocumentEvent) {
                 fillFromPaste()
             }
         })
-        val paste = JPanel(BorderLayout(4, 0))
-        paste.border = JBUI.Borders.empty(0, 4, 4, 4)
-        paste.add(ScrollPaneFactory.createScrollPane(pasteArea), BorderLayout.CENTER)
+        val paste = JPanel(BorderLayout(6, 0))
+        paste.border = IdeBorderFactory.createTitledBorder("Or paste a dependency (POM snippet, g:a:v, Gradle or dependency:tree line)", false, JBUI.insets(8, 4, 4, 4))
+        pasteArea.border = JBUI.Borders.empty(4, 6)
+        paste.add(ScrollPaneFactory.createScrollPane(pasteArea).apply { border = JBUI.Borders.customLine(JBColor.border(), 1) }, BorderLayout.CENTER)
         val pasteButtons = JPanel(java.awt.GridLayout(0, 1, 0, 2))
         pasteButtons.add(JButton("Find", AllIcons.Actions.Find).apply {
             toolTipText = "Fill the fields from the pasted text and search"
@@ -255,14 +254,11 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
                 status.text = "Nothing to change: no declaration of ${query.groupId}:${query.artifactId}${from?.let { ":$it" } ?: ""} found"
                 return@runQuery
             }
-            val dialog = PlanDialog(project, "Update ${query.groupId}:${query.artifactId} to $to", items)
-            if (dialog.showAndGet()) {
-                val chosen = dialog.selected()
-                FixRunner.applyAll(project, "Update ${query.groupId}:${query.artifactId} to $to", chosen.map { it.pom to it.fix })
-                status.text = "Applied ${chosen.size} change${if (chosen.size == 1) "" else "s"}; search again to see the result"
-            } else {
-                status.text = "Update cancelled"
-            }
+            val applied = PlanDialog.reviewAndApply(
+                project, "Update ${query.groupId}:${query.artifactId} to $to",
+                "Review the changes; transitive occurrences with another version are excluded at the dependency that brings them in.", items,
+            )
+            status.text = if (applied == null) "Update cancelled" else "Applied $applied change${if (applied == 1) "" else "s"}; search again to see the result"
         }
     }
 
@@ -323,27 +319,5 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
                 }
             }
         }
-    }
-}
-
-/** Lets the user review and deselect the changes of a version update before they are applied. */
-private class PlanDialog(project: Project, title: String, private val items: List<PlanItem>) : DialogWrapper(project) {
-    private val list = CheckBoxList<PlanItem>()
-
-    init {
-        this.title = title
-        val base = project.basePath?.let { Path.of(it) }
-        for (item in items) {
-            val where = base?.takeIf { item.pom.startsWith(it) }?.relativize(item.pom)?.toString() ?: item.pom.toString()
-            list.addItem(item, "${item.kind.displayName} — $where: ${item.description}", item.selected)
-        }
-        init()
-    }
-
-    fun selected(): List<PlanItem> = items.filter { list.isItemSelected(it) }
-
-    override fun createCenterPanel(): JComponent = JPanel(BorderLayout(0, 6)).apply {
-        add(JBLabel("Review the changes; transitive occurrences with another version are excluded at the dependency that brings them in."), BorderLayout.NORTH)
-        add(ScrollPaneFactory.createScrollPane(list).apply { preferredSize = JBUI.size(900, 400) }, BorderLayout.CENTER)
     }
 }

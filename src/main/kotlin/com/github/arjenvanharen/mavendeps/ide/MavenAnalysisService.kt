@@ -5,6 +5,8 @@ import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.CacheStore
 import com.github.arjenvanharen.mavendeps.core.DependencyResolver
 import com.github.arjenvanharen.mavendeps.core.LocalRepository
+import com.github.arjenvanharen.mavendeps.core.OsvClient
+import com.github.arjenvanharen.mavendeps.core.OsvTransport
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
 import com.github.arjenvanharen.mavendeps.core.RefreshProgress
 import com.github.arjenvanharen.mavendeps.core.VersionHint
@@ -25,6 +27,7 @@ import com.intellij.platform.ide.progress.withBackgroundProgress
 import com.intellij.psi.PsiManager
 import com.intellij.platform.util.progress.RawProgressReporter
 import com.intellij.platform.util.progress.reportRawProgress
+import com.intellij.util.io.HttpRequests
 import com.intellij.util.messages.Topic
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -122,6 +125,16 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
                 }
             }
         }
+    }
+
+    /** Vulnerability lookups at osv.dev through the IDE's HTTP settings (proxy, certificates); advisories are cached for the session. */
+    val osv: OsvClient by lazy {
+        OsvClient(object : OsvTransport {
+            override fun post(url: String, json: String): String =
+                HttpRequests.post(url, "application/json").productNameAsUserAgent().connect { it.write(json); it.readString() }
+
+            override fun get(url: String): String = HttpRequests.request(url).productNameAsUserAgent().readString()
+        })
     }
 
     /** The local Maven repository used for transitive dependencies. */
@@ -246,7 +259,7 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
     private fun restartPomHighlighting() {
         val psi = PsiManager.getInstance(project)
         val daemon = DaemonCodeAnalyzer.getInstance(project)
-        FileEditorManager.getInstance(project).openFiles.filter { it.name == "pom.xml" }.forEach { vf -> psi.findFile(vf)?.let { daemon.restart(it) } }
+        FileEditorManager.getInstance(project).openFiles.filter { it.name == "pom.xml" }.forEach { vf -> psi.findFile(vf)?.let { daemon.restart(it, "Maven analysis updated") } }
     }
 
     /** Passes engine progress to the IDE progress indicator and, throttled and never going backwards, to the inline bars. */

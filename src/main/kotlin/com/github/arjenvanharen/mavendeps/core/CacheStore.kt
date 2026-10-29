@@ -17,7 +17,7 @@ import java.util.zip.GZIPOutputStream
  */
 object CacheStore {
     private const val MAGIC = 0x4D444143 // "MDAC"
-    private const val VERSION = 3
+    private const val VERSION = 4
     private const val MAX_ITEMS = 1_000_000
 
     fun write(file: Path, entries: Collection<PomEntry>) {
@@ -198,6 +198,7 @@ object CacheStore {
                 writeStr(f.groupId)
                 writeStr(f.artifactId)
                 writeStr(f.version)
+                writeBoolean(f.managed)
             }
             is CompositeFix -> {
                 writeByte(5)
@@ -213,7 +214,7 @@ object CacheStore {
             1 -> SetChild(title, readRef(), readStr(), readNullable())
             2 -> DefineProperty(title, readNullable()?.let { Paths.get(it) }, readStr(), readNullable())
             3 -> AddExclusion(title, readRef(), readStr(), readStr())
-            4 -> AddDependency(title, readNullable()?.let { Paths.get(it) }, readStr(), readStr(), readStr())
+            4 -> AddDependency(title, readNullable()?.let { Paths.get(it) }, readStr(), readStr(), readStr(), readBoolean())
             5 -> CompositeFix(title, readList { readFix() })
             else -> throw java.io.IOException("Unknown fix kind $kind")
         }

@@ -58,7 +58,7 @@ class HardeningTest {
         val file = f.path("cache.bin")
         DataOutputStream(GZIPOutputStream(Files.newOutputStream(file))).use {
             it.writeInt(0x4D444143)
-            it.writeInt(3)
+            it.writeInt(4)
             it.writeInt(Int.MAX_VALUE)
         }
         assertTrue(CacheStore.read(file).isEmpty())

@@ -23,7 +23,15 @@ data class DefineProperty(override val title: String, val pom: Path?, val name: 
 
 data class AddExclusion(override val title: String, val target: ElementRef, val groupId: String, val artifactId: String) : QuickFix
 
-data class AddDependency(override val title: String, val pom: Path?, val groupId: String, val artifactId: String, val version: String) : QuickFix
+/** Adds a dependency to [pom], or with [managed] to its `<dependencyManagement>` (setting the version when already managed there). */
+data class AddDependency(
+    override val title: String,
+    val pom: Path?,
+    val groupId: String,
+    val artifactId: String,
+    val version: String,
+    val managed: Boolean = false,
+) : QuickFix
 
 data class CompositeFix(override val title: String, val parts: List<QuickFix>) : QuickFix
 
@@ -91,13 +99,19 @@ object FixApplier {
                     }
                 }
                 is AddDependency -> {
-                    val deps = d.root.child("dependencies")?.children("dependency").orEmpty()
-                    if (deps.none { it.childText("groupId") == leaf.groupId && it.childText("artifactId") == leaf.artifactId }) {
-                        d.append(
-                            d.root, "dependencies",
-                            "<dependency><groupId>${esc(leaf.groupId)}</groupId><artifactId>${esc(leaf.artifactId)}</artifactId>" +
-                                "<version>${esc(leaf.version)}</version></dependency>",
-                        )
+                    val snippet = "<dependency><groupId>${esc(leaf.groupId)}</groupId><artifactId>${esc(leaf.artifactId)}</artifactId>" +
+                        "<version>${esc(leaf.version)}</version></dependency>"
+                    fun same(n: XNode) = n.childText("groupId") == leaf.groupId && n.childText("artifactId") == leaf.artifactId
+                    if (leaf.managed) {
+                        val dm = d.root.child("dependencyManagement")
+                        val existing = dm?.child("dependencies")?.children("dependency")?.firstOrNull(::same)
+                        when {
+                            existing != null -> d.setChild(existing, "version", leaf.version)
+                            dm == null -> d.append(d.root, "dependencyManagement", "<dependencies>$snippet</dependencies>")
+                            else -> d.append(dm, "dependencies", snippet)
+                        }
+                    } else if (d.root.child("dependencies")?.children("dependency").orEmpty().none(::same)) {
+                        d.append(d.root, "dependencies", snippet)
                     }
                 }
                 is CompositeFix -> error("flattened")

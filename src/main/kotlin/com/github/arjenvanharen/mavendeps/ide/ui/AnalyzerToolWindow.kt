@@ -85,6 +85,7 @@ class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
         contents.addContent(factory.createContent(ExplorerPanel(project, toolWindow.disposable, actions), "Explorer", false))
         contents.addContent(factory.createContent(GraphPanel(project, toolWindow.disposable), "Graph", false))
         contents.addContent(dependenciesContent)
+        contents.addContent(factory.createContent(SecurityPanel(project, toolWindow.disposable), "Security", false))
     }
 }
 

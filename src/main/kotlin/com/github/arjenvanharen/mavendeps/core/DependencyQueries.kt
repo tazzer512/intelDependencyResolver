@@ -93,6 +93,7 @@ data class PlanItem(val kind: Kind, val pom: Path, val description: String, val 
         PROPERTY("Update property"),
         EXCLUSION("Exclude transitive version"),
         DIRECT_DEPENDENCY("Declare directly"),
+        MANAGED("Pin in dependencyManagement"),
     }
 }
 
@@ -113,38 +114,11 @@ object VersionUpdatePlanner {
         checkCanceled: () -> Unit = {},
     ): List<PlanItem> {
         val ga = "$groupId:$artifactId"
-        val query = DependencyQuery(groupId, artifactId)
-        val items = ArrayList<PlanItem>()
-        val propertyUpdates = HashSet<Pair<Path, String>>()
         fun selected(version: String?) = from.isNullOrBlank() || version == from
 
         // Declarations in the workspace.
         val updatedManagementIn = HashSet<Path>()
-        for (hit in DependencySearch.declarations(ws, resolver, query)) {
-            val raw = hit.dependency.version
-            if (raw.isNullOrEmpty() || !selected(hit.resolvedVersion) || hit.resolvedVersion == to) continue
-            val depRef = ElementRef(hit.pom, "dependency", hit.dependency.pos)
-            val section = if (hit.dependency.section == DependencySection.DEPENDENCY_MANAGEMENT) "dependencyManagement" else "dependencies"
-            val property = Regex("""\$\{([^}]+)}""").matchEntire(raw.trim())?.groupValues?.get(1)
-            if (property != null && !PropertyValidator.isBuiltin(property)) {
-                val definer = (listOf(hit.pom) + ws.ancestry(hit.pom).chain).firstOrNull { property in ws.model(it)!!.properties } ?: hit.pom
-                if (!propertyUpdates.add(definer to property)) continue
-                val sharedWith = ws.entries.values.sumOf { e ->
-                    e.model.dependencies.count { it.version?.trim() == raw.trim() && "${it.groupId}:${it.artifactId}" != ga }
-                }
-                val note = if (sharedWith > 0) " (also used by $sharedWith other declaration${if (sharedWith > 1) "s" else ""})" else ""
-                items += PlanItem(
-                    PlanItem.Kind.PROPERTY, definer, "Set property $property from ${hit.resolvedVersion} to $to$note",
-                    DefineProperty("Set $property to $to", definer, property, to), true,
-                )
-            } else {
-                items += PlanItem(
-                    PlanItem.Kind.DECLARATION, hit.pom, "Change $ga in <$section> from ${hit.resolvedVersion ?: raw} to $to",
-                    SetChild("Set version to $to", depRef, "version", to), true,
-                )
-            }
-            if (hit.dependency.section == DependencySection.DEPENDENCY_MANAGEMENT) updatedManagementIn.add(hit.pom)
-        }
+        val items = ArrayList(declarationItems(ws, resolver, groupId, artifactId, to, ::selected, HashSet(), updatedManagementIn))
 
         // Transitive occurrences with another version.
         val exclusions = HashSet<Pair<Path, Pos>>()
@@ -183,6 +157,51 @@ object VersionUpdatePlanner {
                     AddDependency("Add $ga:$to", module, groupId, artifactId, to), false,
                 )
             }
+        }
+        return items
+    }
+    /**
+     * Updates of every declaration of `groupId:artifactId` whose resolved version passes [include] to [to]: in place
+     * for literal versions, through the defining POM for `${property}` versions. [propertyUpdates] is shared between
+     * calls so a property used by several artifacts is changed once; POMs whose `<dependencyManagement>` was updated
+     * are added to [updatedManagementIn].
+     */
+    fun declarationItems(
+        ws: Workspace,
+        resolver: DependencyResolver,
+        groupId: String,
+        artifactId: String,
+        to: String,
+        include: (String?) -> Boolean,
+        propertyUpdates: MutableSet<Pair<Path, String>>,
+        updatedManagementIn: MutableSet<Path>,
+    ): List<PlanItem> {
+        val ga = "$groupId:$artifactId"
+        val items = ArrayList<PlanItem>()
+        for (hit in DependencySearch.declarations(ws, resolver, DependencyQuery(groupId, artifactId))) {
+            val raw = hit.dependency.version
+            if (raw.isNullOrEmpty() || !include(hit.resolvedVersion) || hit.resolvedVersion == to) continue
+            val depRef = ElementRef(hit.pom, "dependency", hit.dependency.pos)
+            val section = if (hit.dependency.section == DependencySection.DEPENDENCY_MANAGEMENT) "dependencyManagement" else "dependencies"
+            val property = Regex("""\$\{([^}]+)}""").matchEntire(raw.trim())?.groupValues?.get(1)
+            if (property != null && !PropertyValidator.isBuiltin(property)) {
+                val definer = (listOf(hit.pom) + ws.ancestry(hit.pom).chain).firstOrNull { property in ws.model(it)!!.properties } ?: hit.pom
+                if (!propertyUpdates.add(definer to property)) continue
+                val sharedWith = ws.entries.values.sumOf { e ->
+                    e.model.dependencies.count { it.version?.trim() == raw.trim() && "${it.groupId}:${it.artifactId}" != ga }
+                }
+                val note = if (sharedWith > 0) " (also used by $sharedWith other declaration${if (sharedWith > 1) "s" else ""})" else ""
+                items += PlanItem(
+                    PlanItem.Kind.PROPERTY, definer, "Set property $property from ${hit.resolvedVersion} to $to$note",
+                    DefineProperty("Set $property to $to", definer, property, to), true,
+                )
+            } else {
+                items += PlanItem(
+                    PlanItem.Kind.DECLARATION, hit.pom, "Change $ga in <$section> from ${hit.resolvedVersion ?: raw} to $to",
+                    SetChild("Set version to $to", depRef, "version", to), true,
+                )
+            }
+            if (hit.dependency.section == DependencySection.DEPENDENCY_MANAGEMENT) updatedManagementIn.add(hit.pom)
         }
         return items
     }
