@@ -1,5 +1,8 @@
 package com.github.arjenvanharen.mavendeps.ide.ui
 
+import com.github.arjenvanharen.mavendeps.core.MavenVersion
+import com.intellij.ui.ColorUtil
+import com.intellij.ui.JBColor
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.Coordinates
 import com.github.arjenvanharen.mavendeps.core.DependencyIndex
@@ -93,7 +96,21 @@ private class UsageItem(val usage: LibraryUsage) {
     override fun toString() = usage.module.toString() + ":" + usage.node.chain.joinToString { it.label }
 }
 
-private class Loaded(val result: AnalysisResult, val resolver: DependencyResolver, val trees: Map<Path, DependencyTree>, val libraries: Map<String, Library>)
+private class Loaded(
+    val result: AnalysisResult,
+    val resolver: DependencyResolver,
+    val trees: Map<Path, DependencyTree>,
+    val libraries: Map<String, Library>,
+    /** Versions in the local repository per groupId:artifactId, oldest first. */
+    val local: Map<String, List<String>>,
+) {
+    /** The newest local version when it is newer than every version the workspace resolves. */
+    fun newer(lib: Library): String? {
+        val current = lib.versions.maxWithOrNull(MavenVersion.COMPARATOR) ?: return null
+        val cur = MavenVersion(current)
+        return local[lib.ga].orEmpty().lastOrNull { v -> MavenVersion(v).let { it > cur && (cur.isPreRelease || !it.isPreRelease) } }
+    }
+}
 
 /**
  * Browse the module hierarchy and every module's resolved dependency tree, or turn it around and browse libraries
@@ -253,7 +270,10 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 val trees = DependencyIndex.resolveAll(resolver, modules, progress) { done, total, module ->
                     progress.report(done.toDouble() / total, "Resolving ${result.poms[module]?.model?.effectiveGav?.artifactId ?: module.parent.fileName} ($done of $total)")
                 }
-                Loaded(result, resolver, trees, DependencyIndex.libraries(trees).associateBy { it.ga })
+                val libraries = DependencyIndex.libraries(trees)
+                progress.report(1.0, "Reading versions from the local repository")
+                val local = libraries.associate { it.ga to service.repository.versions(it.groupId, it.artifactId) }
+                Loaded(result, resolver, trees, libraries.associateBy { it.ga }, local)
             },
             onProgress = { progress.job(it) },
             onFailure = {
@@ -552,6 +572,16 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         append(row("Resolved versions", lib.versions.joinToString(", ") { esc(it) }.ifEmpty { "<i>none (all omitted)</i>" }))
         if (lib.requestedVersions.size > lib.versions.size) append(row("Also requested", (lib.requestedVersions - lib.versions.toSet()).joinToString(", ") { esc(it) }))
         append(row("Declared directly", if (lib.declared) "yes" else "no, only transitively"))
+        val newer = data.newer(lib)
+        data.local[lib.ga]?.takeIf { it.isNotEmpty() }?.let { local ->
+            append(row("Local repository", local.takeLast(8).joinToString(", ") { v ->
+                when {
+                    v == newer -> "<b style='color:#${ColorUtil.toHex(NEWER_COLOR)}'>${esc(v)} ↑</b>"
+                    v in lib.versions -> "<b>${esc(v)}</b>"
+                    else -> esc(v)
+                }
+            } + if (local.size > 8) " <i>(${local.size - 8} older)</i>" else ""))
+        }
         val byVersion = lib.usages.filter { it.node.status == NodeStatus.INCLUDED }.groupBy { it.node.version }
         for ((version, usages) in byVersion) {
             append(row(esc(version), usages.map { it.module }.distinct().joinToString(", ") { esc(moduleName(it)) }))
@@ -591,6 +621,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                     val modules = lib.modules.size
                     append("  $modules module${if (modules == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     if (!lib.declared) append("  transitive only", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
+                    loaded?.newer(lib)?.let { append("  ↑ $it in local repo", NEWER_ATTRIBUTES) }
                 }
             }
         }
@@ -632,3 +663,6 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         }
     }
 }
+
+private val NEWER_COLOR = JBColor(0x3C8C40, 0x6AAB73)
+private val NEWER_ATTRIBUTES = SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER, NEWER_COLOR)

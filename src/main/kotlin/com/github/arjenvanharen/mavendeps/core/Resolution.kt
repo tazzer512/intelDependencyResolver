@@ -37,6 +37,27 @@ class LocalRepository(val root: Path) {
         return model
     }
 
+    /**
+     * Versions of an artifact in the repository that have a POM, oldest first. Directories left behind by failed
+     * downloads (only `*.lastUpdated` files) are skipped.
+     */
+    fun versions(groupId: String, artifactId: String): List<String> {
+        if (groupId.isEmpty() || artifactId.isEmpty() || "\${" in groupId || "\${" in artifactId) return emptyList()
+        val dir = root.resolve(groupId.replace('.', '/')).resolve(artifactId)
+        val names = try {
+            Files.list(dir).use { s -> s.filter { Files.isRegularFile(it.resolve("$artifactId-${it.fileName}.pom")) }.map { it.fileName.toString() }.toList() }
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        return names.sortedWith(MavenVersion.COMPARATOR)
+    }
+
+    /** Local versions newer than [version]; pre-releases only when [version] is one itself. */
+    fun newerVersions(groupId: String, artifactId: String, version: String): List<String> {
+        val current = MavenVersion(version)
+        return versions(groupId, artifactId).filter { v -> MavenVersion(v).let { it > current && (current.isPreRelease || !it.isPreRelease) } }
+    }
+
     companion object {
         /** `-Dmaven.repo.local`, else `<localRepository>` from `~/.m2/settings.xml`, else `~/.m2/repository`. */
         fun default(): LocalRepository {

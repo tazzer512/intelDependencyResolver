@@ -7,7 +7,10 @@ import com.github.arjenvanharen.mavendeps.core.DependencyResolver
 import com.github.arjenvanharen.mavendeps.core.LocalRepository
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
 import com.github.arjenvanharen.mavendeps.core.RefreshProgress
+import com.github.arjenvanharen.mavendeps.core.VersionHint
+import com.github.arjenvanharen.mavendeps.core.VersionHints
 import com.github.arjenvanharen.mavendeps.core.Workspace
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.PathManager
@@ -121,6 +124,31 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
     /** The last analysed workspace. */
     fun workspace(): Workspace = engine.workspaceSnapshot()
 
+    /** Version hints of the last analysis, computed per POM on first use; one resolver shares its cache for all of them. */
+    private class Insights(val result: AnalysisResult, val resolver: DependencyResolver) {
+        val hints = HashMap<Path, List<VersionHint>>()
+    }
+
+    @Volatile
+    private var insights: Insights? = null
+
+    /** The version hints for a workspace POM, or null when it was not analysed. Reads `~/.m2`; call off the EDT. */
+    fun versionHints(path: Path): List<VersionHint>? {
+        val result = lastResult ?: return null
+        if (result.poms[path]?.model?.wellFormed != true) return null
+        val current = insights?.takeIf { it.result === result } ?: Insights(result, resolver()).also { insights = it }
+        return synchronized(current) {
+            current.hints.getOrPut(path) {
+                try {
+                    VersionHints.forPom(current.resolver.ws, current.resolver, repository, path)
+                } catch (e: Exception) {
+                    LOG.warn("Could not compute version hints for $path", e)
+                    emptyList()
+                }
+            }
+        }
+    }
+
     /**
      * Runs [compute] in the background with a cancellable progress indicator and hands the result to [onDone] on
      * the EDT. [compute] receives a [QueryProgress] that throws when invoked after the user cancelled. [onProgress]
@@ -196,6 +224,8 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
             val files = engine.knownPaths + engine.missingPaths
             watch = Watch(files, files.flatMapTo(HashSet()) { generateSequence(it.parent) { p -> p.parent }.asIterable() })
             project.messageBus.syncPublisher(MavenAnalysisListener.TOPIC).analysisUpdated(result)
+            // Open POM editors show problems and version hints from the analysis.
+            ApplicationManager.getApplication().invokeLater({ DaemonCodeAnalyzer.getInstance(project).restart("Maven analysis updated") }, project.disposed)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

@@ -14,15 +14,24 @@
             <li>Explorer: browse modules with their resolved dependency trees, or every library with the modules that use it
                 and its version conflicts; open any POM from there.</li>
             <li>Paste a &lt;dependency&gt; snippet or coordinates to fill in the search fields.</li>
+            <li>Problems and quick fixes right in the pom.xml editor, and inlay hints with the effective version of managed
+                and property versions, plus newer versions already in the local repository.</li>
+            <li>Graph: an interactive module graph in build order with dependency, parent and aggregation edges.</li>
         </ul>
         Open the <b>Maven Analyzer</b> tool window; use <i>Full Refresh</i> to discard the cache.
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.xml</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="Maven Analyzer" anchor="bottom" icon="AllIcons.General.InspectionsEye"
                     factoryClass="com.github.arjenvanharen.mavendeps.ide.ui.AnalyzerToolWindowFactory"/>
+        <externalAnnotator language="XML" implementationClass="com.github.arjenvanharen.mavendeps.ide.PomProblemAnnotator"/>
+        <codeInsight.declarativeInlayProvider language="XML" providerId="mavendeps.versions" group="VALUES_GROUP"
+                                              isEnabledByDefault="true" bundle="messages.MavenDepsBundle"
+                                              nameKey="inlay.versions.name" descriptionKey="inlay.versions.description"
+                                              implementationClass="com.github.arjenvanharen.mavendeps.ide.VersionInlayProvider"/>
         <postStartupActivity implementation="com.github.arjenvanharen.mavendeps.ide.AnalysisStartup"/>
     </extensions>
 

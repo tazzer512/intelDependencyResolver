@@ -238,11 +238,14 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
             return
         }
         val from = query.version?.takeIf { "*" !in it }
-        val to = Messages.showInputDialog(
-            project,
-            "New version for ${query.groupId}:${query.artifactId}" + (from?.let { " (currently $it)" } ?: " (all current versions)"),
-            "Update Dependency Version", null,
-        )?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        // Offer the versions already in the local repository, newest first; any other version can be typed.
+        val local = service.repository.versions(query.groupId, query.artifactId).reversed()
+        val message = "New version for ${query.groupId}:${query.artifactId}" + (from?.let { " (currently $it)" } ?: " (all current versions)") +
+            if (local.isNotEmpty()) "\nVersions in the local repository are listed; you can also type one." else ""
+        val to = (
+            if (local.isEmpty()) Messages.showInputDialog(project, message, "Update Dependency Version", null)
+            else Messages.showEditableChooseDialog(message, "Update Dependency Version", null, local.toTypedArray(), local.first(), null)
+            )?.trim()?.takeIf { it.isNotEmpty() } ?: return
         status.text = "Planning update to $to…"
         service.runQuery("Planning update of ${query.groupId}:${query.artifactId}", { check ->
             val resolver = service.resolver()

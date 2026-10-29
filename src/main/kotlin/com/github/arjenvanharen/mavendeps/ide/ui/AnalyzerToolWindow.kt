@@ -70,8 +70,20 @@ class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
                 dependencies.updateVersion(coordinates)
             }
         }
-        contents.addContent(factory.createContent(AnalyzerPanel(project, toolWindow.disposable), "Problems", false))
+        val problemsContent = factory.createContent(AnalyzerPanel(project, toolWindow.disposable), "Problems", false)
+        contents.addContent(problemsContent)
+        // The tab title counts errors and warnings, so they are visible from every tab.
+        fun title(result: AnalysisResult) {
+            val count = result.count(Severity.ERROR) + result.count(Severity.WARNING)
+            problemsContent.displayName = if (count > 0) "Problems ($count)" else "Problems"
+        }
+        MavenAnalysisService.getInstance(project).lastResult?.let(::title)
+        project.messageBus.connect(toolWindow.disposable).subscribe(
+            MavenAnalysisListener.TOPIC,
+            MavenAnalysisListener { result -> ApplicationManager.getApplication().invokeLater({ title(result) }, project.disposed) },
+        )
         contents.addContent(factory.createContent(ExplorerPanel(project, toolWindow.disposable, actions), "Explorer", false))
+        contents.addContent(factory.createContent(GraphPanel(project, toolWindow.disposable), "Graph", false))
         contents.addContent(dependenciesContent)
     }
 }

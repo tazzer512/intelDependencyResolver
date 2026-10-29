@@ -57,11 +57,11 @@ object DependencySearch {
         return SearchResult(query, declared, transitive, missing)
     }
 
-    /** Every matching declaration, regardless of version. */
-    fun declarations(ws: Workspace, resolver: DependencyResolver, query: DependencyQuery): List<DeclaredHit> {
+    /** Every matching declaration, regardless of version; only those in [only] when given. */
+    fun declarations(ws: Workspace, resolver: DependencyResolver, query: DependencyQuery, only: Path? = null): List<DeclaredHit> {
         val out = ArrayList<DeclaredHit>()
         for ((path, entry) in ws.entries) {
-            if (!entry.model.wellFormed) continue
+            if (!entry.model.wellFormed || (only != null && path != only)) continue
             for (dep in entry.model.dependencies) {
                 val g = ws.interpolate(path, dep.groupId) ?: continue
                 val a = ws.interpolate(path, dep.artifactId) ?: continue
