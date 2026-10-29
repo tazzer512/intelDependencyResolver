@@ -3,6 +3,7 @@ package com.github.arjenvanharen.mavendeps.ide.ui
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.PomResult
 import com.github.arjenvanharen.mavendeps.core.Category
+import com.github.arjenvanharen.mavendeps.core.Coordinates
 import com.github.arjenvanharen.mavendeps.core.Problem
 import com.github.arjenvanharen.mavendeps.core.QuickFix
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
@@ -10,6 +11,7 @@ import com.github.arjenvanharen.mavendeps.core.Severity
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
 import com.github.arjenvanharen.mavendeps.ide.FixRunner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.ide.DefaultTreeExpander
 import com.intellij.ide.util.treeView.TreeState
@@ -26,11 +28,9 @@ import com.intellij.ui.PopupHandler
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.ColoredTreeCellRenderer
@@ -55,8 +55,24 @@ import javax.swing.tree.DefaultTreeModel
 class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val factory = ContentFactory.getInstance()
-        toolWindow.contentManager.addContent(factory.createContent(AnalyzerPanel(project, toolWindow.disposable), "Problems", false))
-        toolWindow.contentManager.addContent(factory.createContent(DependencyPanel(project), "Dependencies", false))
+        val contents = toolWindow.contentManager
+        val dependencies = DependencyPanel(project)
+        val dependenciesContent = factory.createContent(dependencies, "Dependencies", false)
+        // The explorer hands searches and updates to the Dependencies tab and brings it to the front.
+        val actions = object : DependencyActions {
+            override fun find(coordinates: Coordinates) {
+                contents.setSelectedContent(dependenciesContent)
+                dependencies.find(coordinates)
+            }
+
+            override fun updateVersion(coordinates: Coordinates) {
+                contents.setSelectedContent(dependenciesContent)
+                dependencies.updateVersion(coordinates)
+            }
+        }
+        contents.addContent(factory.createContent(AnalyzerPanel(project, toolWindow.disposable), "Problems", false))
+        contents.addContent(factory.createContent(ExplorerPanel(project, toolWindow.disposable, actions), "Explorer", false))
+        contents.addContent(dependenciesContent)
     }
 }
 
@@ -101,6 +117,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         })
 
         val content = JPanel(BorderLayout())
+        content.add(InlineProgress(project, parent), BorderLayout.NORTH)
         content.add(ScrollPaneFactory.createScrollPane(tree, true), BorderLayout.CENTER)
         status.border = JBUI.Borders.empty(2, 6)
         content.add(status, BorderLayout.SOUTH)
@@ -222,8 +239,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
             is PomNode -> Triple(data.result.path, data.result.model.gavPos.line, 0)
             else -> return false
         }
-        val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: return false
-        OpenFileDescriptor(project, file, maxOf(line - 1, 0), maxOf(column - 1, 0)).navigate(true)
+        Navigation.open(project, path, line, column)
         return true
     }
 

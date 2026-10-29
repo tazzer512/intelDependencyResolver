@@ -16,7 +16,7 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 - A running `runIde` holds Gradle locks. Stop it before building if Gradle hangs on a lock.
 - The IDE SDK download and extraction needs several GB of free disk space in `~/.gradle`.
 - After changing constructor or default parameters, a stale incremental build can cause `NoSuchMethodError` in tests.
-  Fix it with `rm -rf build/classes/kotlin/test build/kotlin/compileTestKotlin`.
+  Fix it with `./gradlew compileTestKotlin --rerun test --no-build-cache`. Deleting the class directories alone is not enough, because the build cache restores them.
 
 ## Layout (`src/main/kotlin/com/github/arjenvanharen/mavendeps`)
 
@@ -29,16 +29,19 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 | `core/StructureValidator.kt` | Single-file checks (tags, coordinates, dependencies), each with quick fixes where possible |
 | `core/Workspace.kt` | Immutable view over all parsed POMs: parent resolution (relativePath, then reactor GA lookup), ancestry, properties, interpolation |
 | `core/Analyzers.kt` | `PomAnalyzer` (per POM, re-run only when affected) and `GlobalAnalyzer` (every refresh, must be cheap). Validation suite plus `RepeatedVersionAnalyzer` (suggestions) |
-| `core/AnalysisEngine.kt` | Discovery, incremental refresh (`INCREMENTAL`/`RESCAN`/`FULL`), affected-set computation |
+| `core/AnalysisEngine.kt` | Discovery, incremental refresh (`INCREMENTAL`/`RESCAN`/`FULL`), affected-set computation, `RefreshProgress` callbacks (reading, then validating) |
 | `core/CacheStore.kt` | Binary gzip disk cache. **Bump `VERSION` whenever anything serialized changes** (model, problems, fixes). |
 | `core/Fixes.kt` | `QuickFix` sealed types (data, cacheable) and `FixApplier`, which re-parses the current text, locates elements by `ElementRef` (path + name + pos) and produces `TextEdit`s that keep the document's indentation and line separator |
 | `core/Resolution.kt` | `LocalRepository` (read-only `~/.m2`, never downloads), `DependencyResolver` (effective models, BOM imports, profiles via `ActivationContext`, nearest-wins trees) |
 | `core/DependencyQueries.kt` | `DependencySearch` (declared vs transitive hits) and `VersionUpdatePlanner` (literal/property updates plus exclusions) |
-| `ide/MavenAnalysisService.kt` | Project service: debounced, merged refresh requests; disk cache in `PathManager.getSystemDir()`; `runQuery` for background queries |
+| `core/DependencyExplorer.kt` | `DependencySnippet` (parses pasted `<dependency>` XML, `g:a:v`, Gradle and `dependency:tree` lines; resolves `${prop}` versions against the workspace), `DependencyIndex` (resolves all modules, groups them into `Library` entries with conflict detection) |
+| `ide/MavenAnalysisService.kt` | Project service: debounced, merged refresh requests; disk cache in `PathManager.getSystemDir()`; analysis progress goes to the IDE indicator and to `MavenAnalysisProgressListener.TOPIC`; `runQuery` runs background queries that take a `QueryProgress` and accept an `onProgress` callback for inline bars |
 | `ide/PomFileListener.kt` | VFS events turned into incremental refreshes (saved files only) |
 | `ide/FixRunner.kt` | Applies fixes to editor documents in one undoable `WriteCommandAction`, then saves (which triggers re-analysis) |
 | `ide/ui/AnalyzerToolWindow.kt` | "Problems" tab: module tree, problems, quick fixes (lightbulb, Alt+Enter, right-click), "Apply All Suggestions" |
-| `ide/ui/DependencyPanel.kt` | "Dependencies" tab: find a dependency (declared / transitive / missing POMs) and "Update Version…" with a review dialog |
+| `ide/ui/InlineProgress.kt` | Progress bar at the top of a tab, shown while the analysis or the tab's own job runs |
+| `ide/ui/ExplorerPanel.kt` | "Explorer" tab: a Modules view (module hierarchy, then each module's resolved tree) or a Libraries view (library, then the modules that use it, conflicts first). Filter, omitted/test/conflict toggles, details pane with links, open a POM (workspace or `~/.m2`) or a declaration. Resolves only while the tab is visible. |
+| `ide/ui/DependencyPanel.kt` | "Dependencies" tab: find a dependency (declared / transitive / missing POMs), a paste box that fills the fields, and "Update Version…" with a review dialog. Implements `DependencyActions` for the Explorer. |
 
 ## Invariants the tests lock in
 
@@ -46,6 +49,7 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 - **External parents** (outside the workspace) silence inherited checks rather than guessing.
 - **Fixes are data.** Every fix can be applied with `FixApplier` against plain text. `QuickFixFlowTest` checks that each fix makes its problem disappear on the next incremental refresh. A POM changed since analysis gives a `FixException` and is never corrupted.
 - **Resolution matches Maven** for common cases. Mediation is nearest-wins, BFS, first declaration wins. test/provided/optional dependencies are not transitive. Exclusions use `*` wildcards. The module's dependencyManagement overrides transitive versions. Cycles are dropped. Profiles are activated by activeByDefault, os, jdk and property. Version ranges, relocations and file activation are not supported. This was verified identical to `mvn dependency:tree` on a real project.
+- **Pasted snippets**: the first dependency fills the fields. Comments and `<exclusions>` are ignored, and incomplete XML is accepted. A `${prop}` version is used only when every workspace POM resolves it to the same value; otherwise the version is left empty.
 - **Version update** never selects "declare directly" by default. Exclusions go on the direct dependency that brings the transitive copy in, which may be declared in a parent. Modules whose dependencyManagement will force the new version need no exclusions.
 
 ## Conventions

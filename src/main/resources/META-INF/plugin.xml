@@ -11,6 +11,9 @@
             <li>Quick fixes for most problems, and suggestions to extract repeated versions into a property.</li>
             <li>Find a dependency in all POMs and in the resolved transitive dependency trees (local repository).</li>
             <li>Update a dependency version in every POM, excluding transitive copies with another version.</li>
+            <li>Explorer: browse modules with their resolved dependency trees, or every library with the modules that use it
+                and its version conflicts; open any POM from there.</li>
+            <li>Paste a &lt;dependency&gt; snippet or coordinates to fill in the search fields.</li>
         </ul>
         Open the <b>Maven Analyzer</b> tool window; use <i>Full Refresh</i> to discard the cache.
     ]]></description>

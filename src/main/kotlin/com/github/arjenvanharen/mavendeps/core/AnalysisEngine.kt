@@ -23,6 +23,18 @@ data class PomResult(val entry: PomEntry, val problems: List<Problem>, val modul
     val model: PomModel get() = entry.model
 }
 
+/** Progress of a refresh: POMs read so far while discovering the tree, then POMs validated. */
+data class RefreshProgress(val phase: Phase, val done: Int, val total: Int) {
+    enum class Phase(val displayName: String) { DISCOVERING("Reading POMs"), VALIDATING("Validating POMs") }
+
+    /** Overall fraction in 0..1; reading counts for the first half, validating for the second. */
+    val fraction: Double
+        get() {
+            val part = if (total == 0) 1.0 else done.toDouble() / total
+            return if (phase == Phase.DISCOVERING) part / 2 else 0.5 + part / 2
+        }
+}
+
 data class RefreshStats(val mode: RefreshMode, val total: Int, val parsed: Int, val reused: Int, val revalidated: Int, val durationMs: Long)
 
 class AnalysisResult(val roots: List<Path>, val poms: Map<Path, PomResult>, val stats: RefreshStats) {
@@ -61,7 +73,12 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
     /** A fresh workspace over the last refresh, safe to query from another thread while the engine keeps refreshing. */
     fun workspaceSnapshot(): Workspace = Workspace(entries)
 
-    fun refresh(roots: Collection<Path>, mode: RefreshMode, changed: Collection<Path> = emptyList()): AnalysisResult {
+    fun refresh(
+        roots: Collection<Path>,
+        mode: RefreshMode,
+        changed: Collection<Path> = emptyList(),
+        progress: (RefreshProgress) -> Unit = {},
+    ): AnalysisResult {
         val start = System.nanoTime()
         val changedPaths = changed.mapTo(HashSet()) { it.toAbsolutePath().normalize() }
         val old = if (mode == RefreshMode.FULL) emptyMap() else entries
@@ -78,13 +95,15 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
             if (path in next || path in missing) continue
             val cached = old[path]
             val mustCheck = mode != RefreshMode.INCREMENTAL || cached == null || path in changedPaths
-            val entry = if (mustCheck) load(path, cached, counter) else cached!!.also { counter.reused++ }
+            val entry = if (mustCheck) load(path, cached, counter, force = path in changedPaths) else cached!!.also { counter.reused++ }
             if (entry == null) {
                 missing.add(path)
                 continue
             }
             if (cached == null || cached.hash != entry.hash) contentChanged.add(path)
             next[path] = entry
+            // The total grows while modules and parents are discovered.
+            progress(RefreshProgress(RefreshProgress.Phase.DISCOVERING, next.size, next.size + queue.size))
             for (module in entry.model.modules) {
                 if (module.name.isNotEmpty()) queue.add(Workspace.pomPath(path.parent.resolve(module.name)))
             }
@@ -100,10 +119,12 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
             if (previous == null || mode == RefreshMode.FULL) next.keys
             else affectedBy(contentChanged + removed, (next.keys - old.keys) + removed, listOf(previous, ws)).filterTo(HashSet()) { it in next }
 
-        for (path in affected) {
+        for ((i, path) in affected.withIndex()) {
+            progress(RefreshProgress(RefreshProgress.Phase.VALIDATING, i, affected.size))
             val entry = next.getValue(path)
             pomProblems[path] = if (entry.model.wellFormed) suite.pomAnalyzers.flatMap { it.analyze(ws, path) } else emptyList()
         }
+        progress(RefreshProgress(RefreshProgress.Phase.VALIDATING, affected.size, affected.size))
         val global = HashMap<Path, MutableList<Problem>>()
         for (analyzer in suite.globalAnalyzers) {
             analyzer.analyze(ws).forEach { (p, problems) -> global.getOrPut(p) { ArrayList() } += problems }
@@ -172,7 +193,8 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
         var reused = 0
     }
 
-    private fun load(path: Path, cached: PomEntry?, counter: Counter): PomEntry? {
+    /** [force] skips the size/mtime shortcut: a same-size edit within the mtime granularity would otherwise be missed. */
+    private fun load(path: Path, cached: PomEntry?, counter: Counter, force: Boolean = false): PomEntry? {
         val attrs = try {
             Files.readAttributes(path, BasicFileAttributes::class.java)
         } catch (_: IOException) {
@@ -181,7 +203,7 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
         if (!attrs.isRegularFile) return null
         val size = attrs.size()
         val mtime = attrs.lastModifiedTime().toMillis()
-        if (cached != null && cached.size == size && cached.lastModified == mtime) {
+        if (!force && cached != null && cached.size == size && cached.lastModified == mtime) {
             counter.reused++
             return cached
         }

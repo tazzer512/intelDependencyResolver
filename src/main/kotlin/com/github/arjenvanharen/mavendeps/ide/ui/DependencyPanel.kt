@@ -1,9 +1,11 @@
 package com.github.arjenvanharen.mavendeps.ide.ui
 
+import com.github.arjenvanharen.mavendeps.core.Coordinates
 import com.github.arjenvanharen.mavendeps.core.DeclaredHit
 import com.github.arjenvanharen.mavendeps.core.DependencyQuery
 import com.github.arjenvanharen.mavendeps.core.DependencySearch
 import com.github.arjenvanharen.mavendeps.core.DependencySection
+import com.github.arjenvanharen.mavendeps.core.DependencySnippet
 import com.github.arjenvanharen.mavendeps.core.NodeStatus
 import com.github.arjenvanharen.mavendeps.core.PlanItem
 import com.github.arjenvanharen.mavendeps.core.Pos
@@ -12,19 +14,20 @@ import com.github.arjenvanharen.mavendeps.core.TransitiveHit
 import com.github.arjenvanharen.mavendeps.core.VersionUpdatePlanner
 import com.github.arjenvanharen.mavendeps.ide.FixRunner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.CheckBoxList
 import com.intellij.ui.ColoredTreeCellRenderer
+import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.DoubleClickListener
 import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
@@ -39,6 +42,7 @@ import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JTree
+import javax.swing.event.DocumentEvent
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 
@@ -61,10 +65,11 @@ private class TransitiveNode(val hit: TransitiveHit) {
 }
 
 /** Finds a dependency in all POMs and resolved dependency trees, and updates its version everywhere. */
-internal class DependencyPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
+internal class DependencyPanel(private val project: Project) : SimpleToolWindowPanel(true, true), DependencyActions {
     private val groupField = JBTextField(18)
     private val artifactField = JBTextField(18)
     private val versionField = JBTextField(10)
+    private val pasteArea = JBTextArea(4, 60)
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
     private val tree = Tree(model)
@@ -91,6 +96,27 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         form.add(JButton("Find", AllIcons.Actions.Find).apply { addActionListener { search() } })
         form.add(JButton("Update Version…", AllIcons.Actions.Edit).apply { addActionListener { updateVersion() } })
 
+        pasteArea.emptyText.text = "Paste a <dependency> snippet, groupId:artifactId:version or a dependency:tree line to fill the fields"
+        pasteArea.font = JBUI.Fonts.create(java.awt.Font.MONOSPACED, pasteArea.font.size)
+        pasteArea.document.addDocumentListener(object : DocumentAdapter() {
+            override fun textChanged(e: DocumentEvent) {
+                fillFromPaste()
+            }
+        })
+        val paste = JPanel(BorderLayout(4, 0))
+        paste.border = JBUI.Borders.empty(0, 4, 4, 4)
+        paste.add(ScrollPaneFactory.createScrollPane(pasteArea), BorderLayout.CENTER)
+        val pasteButtons = JPanel(java.awt.GridLayout(0, 1, 0, 2))
+        pasteButtons.add(JButton("Find", AllIcons.Actions.Find).apply {
+            toolTipText = "Fill the fields from the pasted text and search"
+            addActionListener { if (fillFromPaste()) search() }
+        })
+        pasteButtons.add(JButton("Clear", AllIcons.Actions.GC).apply { addActionListener { pasteArea.text = "" } })
+        paste.add(JPanel(BorderLayout()).apply { add(pasteButtons, BorderLayout.NORTH) }, BorderLayout.EAST)
+        val north = JPanel(BorderLayout())
+        north.add(form, BorderLayout.NORTH)
+        north.add(paste, BorderLayout.CENTER)
+
         tree.isRootVisible = false
         tree.showsRootHandles = true
         tree.cellRenderer = Renderer()
@@ -99,11 +125,54 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         }.installOn(tree)
 
         val content = JPanel(BorderLayout())
-        content.add(form, BorderLayout.NORTH)
+        content.add(north, BorderLayout.NORTH)
         content.add(ScrollPaneFactory.createScrollPane(tree, true), BorderLayout.CENTER)
         status.border = JBUI.Borders.empty(2, 6)
         content.add(status, BorderLayout.SOUTH)
         setContent(content)
+    }
+
+    override fun find(coordinates: Coordinates) {
+        setFields(coordinates)
+        search()
+    }
+
+    override fun updateVersion(coordinates: Coordinates) {
+        setFields(coordinates)
+        updateVersion()
+    }
+
+    private fun setFields(c: Coordinates) {
+        groupField.text = c.groupId
+        artifactField.text = c.artifactId
+        versionField.text = c.version ?: ""
+    }
+
+    /**
+     * Fills the fields from the pasted text. A `${property}` version is replaced by its value in the workspace; when
+     * the modules disagree or nobody defines it, the version is left empty so every version is found.
+     */
+    private fun fillFromPaste(): Boolean {
+        val text = pasteArea.text
+        if (text.isBlank()) return false
+        val found = DependencySnippet.parse(text)
+        val first = found.firstOrNull()
+        if (first == null) {
+            status.text = "No groupId/artifactId found in the pasted text"
+            return false
+        }
+        val raw = first.version
+        val values = raw?.let { DependencySnippet.resolveVersion(service.workspace(), it) }.orEmpty()
+        setFields(first.copy(version = values.singleOrNull()))
+        val more = if (found.size > 1) " (first of ${found.size} dependencies)" else ""
+        status.text = "Parsed ${first.groupId}:${first.artifactId}$more" + when {
+            raw == null -> "; no version, so every version is searched"
+            "\${" !in raw -> ""
+            values.isEmpty() -> "; $raw is not defined in any POM, so every version is searched"
+            values.size == 1 -> "; $raw = ${values.single()}"
+            else -> "; $raw is ${values.joinToString(" / ")} in different modules, so every version is searched"
+        }
+        return true
     }
 
     private fun query(): DependencyQuery? {
@@ -201,8 +270,7 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
             is ModuleNode -> data.path to Pos(1, 1)
             else -> return false
         }
-        val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: return false
-        OpenFileDescriptor(project, file, maxOf(pos.line - 1, 0), maxOf(pos.column - 1, 0)).navigate(true)
+        Navigation.open(project, path, pos.line, pos.column)
         return true
     }
 

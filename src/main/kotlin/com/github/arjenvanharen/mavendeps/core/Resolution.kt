@@ -165,6 +165,9 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
         }
     }
 
+    /** The workspace POM with these coordinates, if the artifact is built in the workspace. */
+    fun workspacePom(groupId: String, artifactId: String, version: String?): Path? = byGav["$groupId:$artifactId:$version"]
+
     /** The effective model of any artifact: a workspace module with these coordinates or a repository POM. */
     fun effective(groupId: String, artifactId: String, version: String): EffectiveModel? {
         byGav["$groupId:$artifactId:$version"]?.let { return effective(it) }
