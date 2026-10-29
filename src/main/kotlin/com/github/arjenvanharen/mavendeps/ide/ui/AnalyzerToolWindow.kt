@@ -2,10 +2,13 @@ package com.github.arjenvanharen.mavendeps.ide.ui
 
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.PomResult
+import com.github.arjenvanharen.mavendeps.core.Category
 import com.github.arjenvanharen.mavendeps.core.Problem
+import com.github.arjenvanharen.mavendeps.core.QuickFix
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
 import com.github.arjenvanharen.mavendeps.core.Severity
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
+import com.github.arjenvanharen.mavendeps.ide.FixRunner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
 import com.intellij.icons.AllIcons
 import com.intellij.ide.DefaultTreeExpander
@@ -15,6 +18,12 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.project.DumbAwareAction
+import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.ui.popup.PopupStep
+import com.intellij.openapi.ui.popup.util.BaseListPopupStep
+import com.intellij.ui.PopupHandler
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
@@ -45,8 +54,9 @@ import javax.swing.tree.DefaultTreeModel
 
 class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = AnalyzerPanel(project, toolWindow.disposable)
-        toolWindow.contentManager.addContent(ContentFactory.getInstance().createContent(panel, null, false))
+        val factory = ContentFactory.getInstance()
+        toolWindow.contentManager.addContent(factory.createContent(AnalyzerPanel(project, toolWindow.disposable), "Problems", false))
+        toolWindow.contentManager.addContent(factory.createContent(DependencyPanel(project), "Dependencies", false))
     }
 }
 
@@ -75,7 +85,18 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         }.installOn(tree)
         tree.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
-                if (e.keyCode == KeyEvent.VK_ENTER && navigateToSelection()) e.consume()
+                if (e.keyCode == KeyEvent.VK_ENTER && e.isAltDown) {
+                    showFixes()
+                    e.consume()
+                } else if (e.keyCode == KeyEvent.VK_ENTER && navigateToSelection()) {
+                    e.consume()
+                }
+            }
+        })
+        tree.addMouseListener(object : PopupHandler() {
+            override fun invokePopup(comp: java.awt.Component, x: Int, y: Int) {
+                tree.getPathForLocation(x, y)?.let { tree.selectionPath = it }
+                showFixes(RelativePoint(comp, java.awt.Point(x, y)))
             }
         })
 
@@ -103,6 +124,21 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         val group = DefaultActionGroup().apply {
             add(actions.getAction("MavenDeps.Refresh"))
             add(actions.getAction("MavenDeps.FullRefresh"))
+            addSeparator()
+            add(object : DumbAwareAction("Apply Quick Fix", "Apply a fix for the selected problem (Alt+Enter)", AllIcons.Actions.IntentionBulb) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = selectedProblem()?.problem?.fixes?.isNotEmpty() == true
+                }
+                override fun actionPerformed(e: AnActionEvent) = showFixes()
+            })
+            add(object : DumbAwareAction("Apply All Suggestions", "Apply every 'extract version property' suggestion", AllIcons.Actions.QuickfixBulb) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = suggestionFixes().isNotEmpty()
+                }
+                override fun actionPerformed(e: AnActionEvent) = FixRunner.applyAll(project, "Apply all suggestions", suggestionFixes())
+            })
             addSeparator()
             add(object : ToggleAction("Show Only POMs With Problems", null, AllIcons.General.Filter), DumbAware {
                 override fun getActionUpdateThread() = ActionUpdateThread.EDT
@@ -149,9 +185,34 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         val s = result.stats
         val errors = result.count(Severity.ERROR)
         val warnings = result.count(Severity.WARNING)
+        val suggestions = result.poms.values.sumOf { r -> r.problems.count { it.category == Category.SUGGESTIONS } }
         status.text = "${s.total} POMs · ${s.parsed} parsed, ${s.reused} cached · ${s.revalidated} revalidated · ${s.durationMs} ms" +
-            " — $errors errors, $warnings warnings"
+            " — $errors errors, $warnings warnings, $suggestions suggestions"
         if (result.poms.isEmpty()) status.text = "No pom.xml found in the project root or content roots"
+    }
+
+    private fun selectedProblem(): ProblemNode? = (tree.selectionPath?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? ProblemNode
+
+    /** One fix per distinct suggestion; the same suggestion is reported on every declaration it touches. */
+    private fun suggestionFixes(): List<Pair<Path, QuickFix>> {
+        val result = MavenAnalysisService.getInstance(project).lastResult ?: return emptyList()
+        return result.poms.values.flatMap { r -> r.problems.filter { it.category == Category.SUGGESTIONS }.flatMap { p -> p.fixes.take(1).map { r.path to it } } }
+            .distinctBy { it.second }
+    }
+
+    private fun showFixes(at: RelativePoint? = null) {
+        val node = selectedProblem() ?: return
+        val fixes = node.problem.fixes
+        if (fixes.isEmpty()) return
+        val step = object : BaseListPopupStep<QuickFix>("Quick Fixes", fixes) {
+            override fun getTextFor(value: QuickFix) = value.title
+            override fun getIconFor(value: QuickFix) = AllIcons.Actions.IntentionBulb
+            override fun onChosen(selectedValue: QuickFix, finalChoice: Boolean): PopupStep<*>? =
+                doFinalStep { FixRunner.apply(project, node.path, selectedValue) }
+        }
+        val popup = JBPopupFactory.getInstance().createListPopup(step)
+        val where = at ?: tree.getPathBounds(tree.selectionPath)?.let { RelativePoint(tree, java.awt.Point(it.x, it.y + it.height)) }
+        if (where != null) popup.show(where) else popup.showInFocusCenter()
     }
 
     private fun navigateToSelection(): Boolean {
@@ -194,6 +255,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
                     append(p.message)
                     val where = if (p.pos.line > 0) " line ${p.pos.line}" else ""
                     append("  [${p.category.displayName}]$where", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    if (p.fixes.isNotEmpty()) append("  ⚡ quick fix", SimpleTextAttributes.GRAY_SMALL_ATTRIBUTES)
                 }
             }
         }

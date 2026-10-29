@@ -3,7 +3,10 @@ package com.github.arjenvanharen.mavendeps.ide
 import com.github.arjenvanharen.mavendeps.core.AnalysisEngine
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.CacheStore
+import com.github.arjenvanharen.mavendeps.core.DependencyResolver
+import com.github.arjenvanharen.mavendeps.core.LocalRepository
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
+import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.components.Service
@@ -18,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.file.Files
@@ -38,7 +42,7 @@ fun interface MavenAnalysisListener {
  * background; parsed POMs are persisted to the IDE system directory so a restart only has to stat files.
  */
 @Service(Service.Level.PROJECT)
-class MavenAnalysisService(private val project: Project, scope: CoroutineScope) {
+class MavenAnalysisService(private val project: Project, private val scope: CoroutineScope) {
     private val engine = AnalysisEngine()
     private val trigger = Channel<Unit>(Channel.CONFLATED)
     private val lock = Any()
@@ -65,6 +69,34 @@ class MavenAnalysisService(private val project: Project, scope: CoroutineScope) 
             for (ignored in trigger) {
                 delay(DEBOUNCE_MS)
                 runPending()
+            }
+        }
+    }
+
+    /** The local Maven repository used for transitive dependencies. */
+    val repository: LocalRepository by lazy { LocalRepository.default() }
+
+    /** A resolver over the last analysed workspace, for one query. */
+    fun resolver(): DependencyResolver = DependencyResolver(engine.workspaceSnapshot(), repository)
+
+    /**
+     * Runs [compute] in the background with a cancellable progress indicator and hands the result to [onDone] on
+     * the EDT. [compute] receives a callback that throws when the user cancels.
+     */
+    fun <T> runQuery(title: String, compute: (checkCanceled: () -> Unit) -> T, onDone: (T) -> Unit) {
+        scope.launch {
+            try {
+                val result = withBackgroundProgress(project, title, cancellable = true) {
+                    withContext(Dispatchers.Default) {
+                        val context = coroutineContext
+                        compute { context.ensureActive() }
+                    }
+                }
+                withContext(Dispatchers.EDT) { onDone(result) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                LOG.warn("$title failed", e)
             }
         }
     }

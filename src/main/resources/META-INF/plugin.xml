@@ -8,6 +8,9 @@
             <li>Parses the whole module tree once and caches the result on disk.</li>
             <li>Only re-parses changed POMs and re-validates the modules affected by them.</li>
             <li>Validation: XML syntax, POM structure, multi-module consistency and property references.</li>
+            <li>Quick fixes for most problems, and suggestions to extract repeated versions into a property.</li>
+            <li>Find a dependency in all POMs and in the resolved transitive dependency trees (local repository).</li>
+            <li>Update a dependency version in every POM, excluding transitive copies with another version.</li>
         </ul>
         Open the <b>Maven Analyzer</b> tool window; use <i>Full Refresh</i> to discard the cache.
     ]]></description>

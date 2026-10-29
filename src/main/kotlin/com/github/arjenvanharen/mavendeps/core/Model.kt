@@ -16,9 +16,17 @@ enum class Category(val displayName: String) {
     STRUCTURE("POM structure"),
     MULTI_MODULE("Multi-module"),
     PROPERTIES("Properties"),
+    SUGGESTIONS("Suggestions"),
 }
 
-data class Problem(val severity: Severity, val category: Category, val message: String, val pos: Pos)
+data class Problem(
+    val severity: Severity,
+    val category: Category,
+    val message: String,
+    val pos: Pos,
+    /** Ways to resolve the problem automatically; see [FixApplier]. */
+    val fixes: List<QuickFix> = emptyList(),
+)
 
 data class Gav(val groupId: String?, val artifactId: String?, val version: String?) {
     val ga: String get() = "${groupId ?: "?"}:${artifactId ?: "?"}"
@@ -48,6 +56,9 @@ data class Dependency(
     val section: DependencySection,
     val profile: String?,
     val pos: Pos,
+    val optional: Boolean = false,
+    /** Excluded `groupId:artifactId` patterns (`*` allowed). */
+    val exclusions: List<String> = emptyList(),
 ) {
     /** Maven's management key: `groupId:artifactId:type[:classifier]`. */
     fun managementKey(resolve: (String?) -> String? = { it }): String {
@@ -58,6 +69,19 @@ data class Dependency(
 
     val display: String get() = "${groupId ?: "?"}:${artifactId ?: "?"}${version?.let { ":$it" } ?: ""}"
 }
+
+/** `<activation>` of a profile; null fields are not part of the condition. Values may start with `!` to negate. */
+data class Activation(
+    val activeByDefault: Boolean = false,
+    val jdk: String? = null,
+    val osFamily: String? = null,
+    val osName: String? = null,
+    val osArch: String? = null,
+    val propertyName: String? = null,
+    val propertyValue: String? = null,
+)
+
+data class Profile(val id: String, val activation: Activation, val properties: Map<String, String>)
 
 /** A `${name}` reference. [critical] references affect the project model (coordinates, dependencies, ...). */
 data class PropertyRef(val name: String, val pos: Pos, val critical: Boolean)
@@ -76,6 +100,7 @@ data class PomModel(
     val profileProperties: Set<String>,
     val dependencies: List<Dependency>,
     val propertyRefs: List<PropertyRef>,
+    val profiles: List<Profile> = emptyList(),
 ) {
     /** Coordinates with groupId/version inherited from the parent declaration when missing. */
     val effectiveGav: Gav

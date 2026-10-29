@@ -17,7 +17,7 @@ import java.util.zip.GZIPOutputStream
  */
 object CacheStore {
     private const val MAGIC = 0x4D444143 // "MDAC"
-    private const val VERSION = 1
+    private const val VERSION = 3
 
     fun write(file: Path, entries: Collection<PomEntry>) {
         Files.createDirectories(file.parent)
@@ -98,11 +98,23 @@ object CacheStore {
             writeByte(it.section.ordinal)
             writeNullable(it.profile)
             writePos(it.pos)
+            writeBoolean(it.optional)
+            writeList(it.exclusions) { e -> writeStr(e) }
         }
         writeList(m.propertyRefs) {
             writeStr(it.name)
             writePos(it.pos)
             writeBoolean(it.critical)
+        }
+        writeList(m.profiles) { p ->
+            writeStr(p.id)
+            val a = p.activation
+            writeBoolean(a.activeByDefault)
+            listOf(a.jdk, a.osFamily, a.osName, a.osArch, a.propertyName, a.propertyValue).forEach { writeNullable(it) }
+            writeList(p.properties.entries.toList()) {
+                writeStr(it.key)
+                writeStr(it.value)
+            }
         }
     }
 
@@ -128,10 +140,19 @@ object CacheStore {
                 section = DependencySection.entries[readByte().toInt()],
                 profile = readNullable(),
                 pos = readPos(),
+                optional = readBoolean(),
+                exclusions = readList { readStr() },
             )
         }
         val refs = readList { PropertyRef(readStr(), readPos(), readBoolean()) }
-        return PomModel(wellFormed, modelVersion, gav, gavPos, packaging, parent, modules, properties, profileProperties, dependencies, refs)
+        val profiles = readList {
+            Profile(
+                readStr(),
+                Activation(readBoolean(), readNullable(), readNullable(), readNullable(), readNullable(), readNullable(), readNullable()),
+                readList { readStr() to readStr() }.toMap(LinkedHashMap()),
+            )
+        }
+        return PomModel(wellFormed, modelVersion, gav, gavPos, packaging, parent, modules, properties, profileProperties, dependencies, refs, profiles)
     }
 
     private fun DataOutputStream.writeProblem(p: Problem) {
@@ -139,10 +160,71 @@ object CacheStore {
         writeByte(p.category.ordinal)
         writeStr(p.message)
         writePos(p.pos)
+        writeList(p.fixes) { writeFix(it) }
     }
 
     private fun DataInputStream.readProblem() =
-        Problem(Severity.entries[readByte().toInt()], Category.entries[readByte().toInt()], readStr(), readPos())
+        Problem(Severity.entries[readByte().toInt()], Category.entries[readByte().toInt()], readStr(), readPos(), readList { readFix() })
+
+    private fun DataOutputStream.writeFix(f: QuickFix) {
+        writeStr(f.title)
+        when (f) {
+            is RemoveElement -> {
+                writeByte(0)
+                writeRef(f.target)
+            }
+            is SetChild -> {
+                writeByte(1)
+                writeRef(f.target)
+                writeStr(f.child)
+                writeNullable(f.value)
+            }
+            is DefineProperty -> {
+                writeByte(2)
+                writeNullable(f.pom?.toString())
+                writeStr(f.name)
+                writeNullable(f.value)
+            }
+            is AddExclusion -> {
+                writeByte(3)
+                writeRef(f.target)
+                writeStr(f.groupId)
+                writeStr(f.artifactId)
+            }
+            is AddDependency -> {
+                writeByte(4)
+                writeNullable(f.pom?.toString())
+                writeStr(f.groupId)
+                writeStr(f.artifactId)
+                writeStr(f.version)
+            }
+            is CompositeFix -> {
+                writeByte(5)
+                writeList(f.parts) { writeFix(it) }
+            }
+        }
+    }
+
+    private fun DataInputStream.readFix(): QuickFix {
+        val title = readStr()
+        return when (val kind = readByte().toInt()) {
+            0 -> RemoveElement(title, readRef())
+            1 -> SetChild(title, readRef(), readStr(), readNullable())
+            2 -> DefineProperty(title, readNullable()?.let { Paths.get(it) }, readStr(), readNullable())
+            3 -> AddExclusion(title, readRef(), readStr(), readStr())
+            4 -> AddDependency(title, readNullable()?.let { Paths.get(it) }, readStr(), readStr(), readStr())
+            5 -> CompositeFix(title, readList { readFix() })
+            else -> throw java.io.IOException("Unknown fix kind $kind")
+        }
+    }
+
+    private fun DataOutputStream.writeRef(r: ElementRef) {
+        writeNullable(r.path?.toString())
+        writeNullable(r.name)
+        writePos(r.pos)
+    }
+
+    private fun DataInputStream.readRef() = ElementRef(readNullable()?.let { Paths.get(it) }, readNullable(), readPos())
 
     private fun DataOutputStream.writeGav(g: Gav) {
         writeNullable(g.groupId)

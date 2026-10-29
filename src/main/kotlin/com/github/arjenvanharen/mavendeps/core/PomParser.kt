@@ -1,12 +1,19 @@
 package com.github.arjenvanharen.mavendeps.core
 
 import java.io.ByteArrayInputStream
+import java.io.StringReader
 import javax.xml.stream.XMLInputFactory
 import javax.xml.stream.XMLStreamConstants
 import javax.xml.stream.XMLStreamException
+import javax.xml.stream.XMLStreamReader
 
-/** Minimal element tree with source positions; enough for POM extraction and validation. */
+/**
+ * Minimal element tree with source positions; enough for POM extraction and validation.
+ * [pos] is where the start tag ends, [endPos] where the end tag ends (equal for `<empty/>` elements).
+ */
 class XNode(val name: String, val pos: Pos, val parent: XNode?) {
+    var endPos: Pos = pos
+        internal set
     val children = ArrayList<XNode>()
     val attributes = LinkedHashMap<String, String>()
     internal val textBuilder = StringBuilder()
@@ -32,12 +39,17 @@ object PomParser {
         setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true)
     }
 
-    fun parse(bytes: ByteArray): ParseResult {
+    fun parse(bytes: ByteArray): ParseResult = parse { factory.createXMLStreamReader(ByteArrayInputStream(bytes)) }
+
+    /** Parses already decoded text, e.g. an editor document; positions match [parse] of the same content. */
+    fun parse(text: String): ParseResult = parse { factory.createXMLStreamReader(StringReader(text)) }
+
+    private fun parse(open: () -> XMLStreamReader): ParseResult {
         val problems = ArrayList<Problem>()
         var root: XNode? = null
         var wellFormed = true
         try {
-            val reader = synchronized(factory) { factory.createXMLStreamReader(ByteArrayInputStream(bytes)) }
+            val reader = synchronized(factory) { open() }
             try {
                 var current: XNode? = null
                 while (reader.hasNext()) {
@@ -50,7 +62,10 @@ object PomParser {
                             if (current == null) root = node else current.children.add(node)
                             current = node
                         }
-                        XMLStreamConstants.END_ELEMENT -> current = current?.parent
+                        XMLStreamConstants.END_ELEMENT -> {
+                            current?.endPos = Pos(reader.location.lineNumber, reader.location.columnNumber)
+                            current = current?.parent
+                        }
                         XMLStreamConstants.CHARACTERS, XMLStreamConstants.CDATA, XMLStreamConstants.SPACE ->
                             current?.textBuilder?.append(reader.text)
                     }
@@ -87,6 +102,7 @@ object PomParser {
         val modules = ArrayList<ModuleRef>()
         val dependencies = ArrayList<Dependency>()
         val profileProperties = LinkedHashSet<String>()
+        val profiles = ArrayList<Profile>()
 
         fun collect(owner: XNode, profile: String?) {
             for (container in owner.children("modules")) container.children("module").forEach { modules += ModuleRef(it.text, it.pos, profile) }
@@ -106,6 +122,17 @@ object PomParser {
             val id = profile.childText("id") ?: "<no id>"
             collect(profile, id)
             profile.child("properties")?.children?.forEach { profileProperties += it.name }
+            val act = profile.child("activation")
+            val activation = Activation(
+                activeByDefault = act?.childText("activeByDefault") == "true",
+                jdk = act?.childText("jdk"),
+                osFamily = act?.child("os")?.childText("family"),
+                osName = act?.child("os")?.childText("name"),
+                osArch = act?.child("os")?.childText("arch"),
+                propertyName = act?.child("property")?.childText("name"),
+                propertyValue = act?.child("property")?.childText("value"),
+            )
+            profiles += Profile(id, activation, profile.child("properties")?.children.orEmpty().associateTo(LinkedHashMap()) { it.name to it.text })
         }
 
         val properties = LinkedHashMap<String, String>()
@@ -127,6 +154,7 @@ object PomParser {
             profileProperties = profileProperties,
             dependencies = dependencies,
             propertyRefs = collectPropertyRefs(root),
+            profiles = profiles,
         )
     }
 
@@ -141,6 +169,9 @@ object PomParser {
         section = section,
         profile = profile,
         pos = node.pos,
+        optional = node.childText("optional") == "true",
+        exclusions = node.child("exclusions")?.children("exclusion").orEmpty()
+            .map { "${it.childText("groupId") ?: "*"}:${it.childText("artifactId") ?: "*"}" },
     )
 
     /** Elements whose contents are interpreted by plugins rather than by the model builder. */

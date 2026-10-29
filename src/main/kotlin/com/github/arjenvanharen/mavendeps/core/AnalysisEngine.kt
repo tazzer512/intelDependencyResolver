@@ -34,6 +34,7 @@ class AnalysisResult(val roots: List<Path>, val poms: Map<Path, PomResult>, val 
  * re-runs cross-file analyzers only for POMs affected by a change. Not thread-safe; callers serialize access.
  */
 class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION) {
+    @Volatile
     private var entries: Map<Path, PomEntry> = emptyMap()
     private var workspace: Workspace? = null
     private val pomProblems = HashMap<Path, List<Problem>>()
@@ -56,6 +57,9 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
     }
 
     fun snapshot(): Collection<PomEntry> = entries.values
+
+    /** A fresh workspace over the last refresh, safe to query from another thread while the engine keeps refreshing. */
+    fun workspaceSnapshot(): Workspace = Workspace(entries)
 
     fun refresh(roots: Collection<Path>, mode: RefreshMode, changed: Collection<Path> = emptyList()): AnalysisResult {
         val start = System.nanoTime()
