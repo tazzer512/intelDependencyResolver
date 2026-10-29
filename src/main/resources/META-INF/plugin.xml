@@ -1,0 +1,36 @@
+<idea-plugin>
+    <id>com.github.arjenvanharen.mavendeps</id>
+    <name>Maven Dependency Analyzer</name>
+    <vendor>Arjen van Haren</vendor>
+    <description><![CDATA[
+        Fast analysis of Maven POMs in single- and multi-module projects.
+        <ul>
+            <li>Parses the whole module tree once and caches the result on disk.</li>
+            <li>Only re-parses changed POMs and re-validates the modules affected by them.</li>
+            <li>Validation: XML syntax, POM structure, multi-module consistency and property references.</li>
+        </ul>
+        Open the <b>Maven Analyzer</b> tool window; use <i>Full Refresh</i> to discard the cache.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Maven Analyzer" anchor="bottom" icon="AllIcons.General.InspectionsEye"
+                    factoryClass="com.github.arjenvanharen.mavendeps.ide.ui.AnalyzerToolWindowFactory"/>
+        <postStartupActivity implementation="com.github.arjenvanharen.mavendeps.ide.AnalysisStartup"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="com.github.arjenvanharen.mavendeps.ide.PomFileListener"
+                  topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </projectListeners>
+
+    <actions>
+        <action id="MavenDeps.Refresh" class="com.github.arjenvanharen.mavendeps.ide.RefreshAction"
+                text="Refresh Maven Analysis" description="Re-parse changed POMs and re-validate affected modules"
+                icon="AllIcons.Actions.Refresh"/>
+        <action id="MavenDeps.FullRefresh" class="com.github.arjenvanharen.mavendeps.ide.FullRefreshAction"
+                text="Full Refresh Maven Analysis" description="Discard the cache and re-parse every POM"
+                icon="AllIcons.Actions.ForceRefresh"/>
+    </actions>
+</idea-plugin>
