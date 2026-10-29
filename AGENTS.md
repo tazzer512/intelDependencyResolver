@@ -10,6 +10,8 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 | Unit tests (core, no IDE) | `./gradlew test` |
 | One test class | `./gradlew test --tests '*FixApplierTest*'` |
 | Plugin zip | `./gradlew buildPlugin` → `build/distributions/maven-dependency-analyzer-<version>.zip` |
+| Release zip into `bup/` | `./gradlew bup` (builds the plugin, then copies the zip; `bup/` is committed) |
+| Raise the version | `./gradlew bumpVersion -Ppart=major\|minor\|patch` (rewrites `pluginVersion` in `gradle.properties`) |
 | Sandbox IDE with the plugin | `./gradlew runIde` (log: `.intellijPlatform/sandbox/maven-dependency-analyzer/IU-2026.2.3/log_runIde/idea.log`) |
 
 - Targets IntelliJ IDEA 2026.2.3 (`sinceBuild = 261`). Java **and** Kotlin target JVM 25; they must match or the build fails.
@@ -69,6 +71,8 @@ not IntelliJ's Maven plugin, so it works without a Maven import and stays fast.
 
 ## Conventions
 
+- Versioning: `pluginVersion` in `gradle.properties` is the only version. Record user-visible changes under
+  `[Unreleased]` in `CHANGELOG.md`; on release, move them to a `[x.y.z]` section, which becomes the plugin's change notes. Tag releases `vx.y.z`.
 - Kotlin pitfall: `java.nio.file.Path` is `Iterable<Path>`. `set += path`, `list + path` and `setOf(...) + path` add path *segments*. Use `.add(path)` or `plusElement(path)`.
 - User-visible features are described in `README.md` (by tab) and in the `<description>` of `plugin.xml`. Update both when a feature changes. Each tab is one row in the Layout table above.
 - Keep `core/` free of IntelliJ imports. Put logic there with a unit test, and keep `ide/` as glue.

@@ -78,8 +78,23 @@ Requires JDK 25.
 | Unit tests | `./gradlew test` |
 | Plugin zip | `./gradlew buildPlugin`, which writes `build/distributions/maven-dependency-analyzer-<version>.zip` |
 | Sandbox IDE with the plugin | `./gradlew runIde` |
+| Release zip into `bup/` | `./gradlew bup` |
 
-To install the plugin, open **Settings | Plugins**, click ⚙, choose **Install Plugin from Disk…** and select the zip.
+A ready-built zip of each released version is in [`bup/`](bup). To install it, open **Settings | Plugins**, click ⚙,
+choose **Install Plugin from Disk…** and select the zip.
+
+## Versioning
+
+The plugin uses [semantic versioning](https://semver.org). The version is `pluginVersion` in `gradle.properties`, and
+[`CHANGELOG.md`](CHANGELOG.md) lists the changes per version. The section of the current version becomes the change
+notes shown in the IDE.
+
+To release a new version:
+
+1. `./gradlew bumpVersion -Ppart=patch` (or `minor`, `major`) raises `pluginVersion`.
+2. Move the `[Unreleased]` entries in `CHANGELOG.md` to a new section for that version.
+3. `./gradlew bup` builds the zip into `bup/`.
+4. Commit, then tag the commit `v<version>` and push the tag.
 
 ## Limitations
 
