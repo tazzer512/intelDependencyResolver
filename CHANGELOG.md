@@ -5,6 +5,8 @@ The section of the current `pluginVersion` becomes the plugin's change notes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Added
 - Security tab: "Code is affected by CVE" checkbox. Checks locally, at class level, whether the project's code or the
   libraries it uses reach each advisory's vulnerable classes, and flags advisories that cannot be reached as
