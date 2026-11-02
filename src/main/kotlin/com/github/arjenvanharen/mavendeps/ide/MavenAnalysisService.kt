@@ -22,6 +22,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Condition
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.platform.ide.progress.withBackgroundProgress
 import com.intellij.psi.PsiManager
@@ -68,6 +69,7 @@ class QueryProgress internal constructor(
     private val check: () -> Unit,
     private val reporter: RawProgressReporter,
     private val listener: ((ProgressState?) -> Unit)?,
+    private val expired: Condition<*>,
 ) : () -> Unit {
     private var lastPublished = 0L
 
@@ -79,10 +81,13 @@ class QueryProgress internal constructor(
         val now = System.nanoTime()
         if (listener != null && now - lastPublished > 50_000_000) {
             lastPublished = now
-            ApplicationManager.getApplication().invokeLater { listener(ProgressState(fraction, text)) }
+            ApplicationManager.getApplication().invokeLater({ listener(ProgressState(fraction, text)) }, expired)
         }
     }
 }
+
+/** Passed to `onFailure` when the user cancelled a query, so callers can reset their state. */
+class QueryCancelledException : Exception("Cancelled")
 
 /**
  * Owns the analysis engine of a project. Refresh requests are merged and debounced, then run one at a time in the
@@ -184,23 +189,31 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
         onFailure: (Exception) -> Unit = {},
         onDone: (T) -> Unit,
     ) {
+        val app = ApplicationManager.getApplication()
+        // Every way a query ends must reach onDone or onFailure: callers keep "running" flags that block the next query.
+        fun fail(e: Exception) = app.invokeLater({ onFailure(e) }, project.disposed)
         scope.launch {
-            onProgress?.let { listener -> ApplicationManager.getApplication().invokeLater { listener(ProgressState(null, title)) } }
+            onProgress?.let { listener -> app.invokeLater({ listener(ProgressState(null, title)) }, project.disposed) }
             try {
                 val result = withBackgroundProgress(project, title, cancellable = true) {
                     withContext(Dispatchers.Default) {
                         val context = coroutineContext
-                        reportRawProgress { reporter -> compute(QueryProgress({ context.ensureActive() }, reporter, onProgress)) }
+                        reportRawProgress { reporter -> compute(QueryProgress({ context.ensureActive() }, reporter, onProgress, project.disposed)) }
                     }
                 }
                 withContext(Dispatchers.EDT) { onDone(result) }
             } catch (e: CancellationException) {
+                fail(QueryCancelledException())
                 throw e
             } catch (e: Exception) {
                 LOG.warn("$title failed", e)
-                withContext(Dispatchers.EDT) { onFailure(e) }
+                fail(e)
+            } catch (e: Throwable) {
+                // e.g. a StackOverflowError on crafted input: report it instead of leaving the caller waiting.
+                LOG.warn("$title failed", e)
+                fail(RuntimeException(e.toString(), e))
             } finally {
-                onProgress?.let { listener -> ApplicationManager.getApplication().invokeLater { listener(null) } }
+                onProgress?.let { listener -> app.invokeLater({ listener(null) }, project.disposed) }
             }
         }
     }

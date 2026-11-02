@@ -8,6 +8,7 @@ import com.github.arjenvanharen.mavendeps.core.ModuleGraph
 import com.github.arjenvanharen.mavendeps.core.Severity
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.QueryCancelledException
 import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
@@ -195,7 +196,8 @@ internal class GraphPanel(private val project: Project, parent: Disposable) : Si
             onProgress = { progress.job(it) },
             onFailure = {
                 loading = false
-                status.text = "Building the graph failed: ${it.message}"
+                stale = true
+                status.text = if (it is QueryCancelledException) "Building the graph was cancelled" else "Building the graph failed: ${it.message}"
             },
         ) {
             loading = false

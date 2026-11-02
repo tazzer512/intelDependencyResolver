@@ -39,13 +39,27 @@ data class RefreshStats(val mode: RefreshMode, val total: Int, val parsed: Int, 
 
 class AnalysisResult(val roots: List<Path>, val poms: Map<Path, PomResult>, val stats: RefreshStats) {
     fun count(severity: Severity) = poms.values.sumOf { r -> r.problems.count { it.severity == severity } }
+
+    /**
+     * Whether the file at [path] is still the one this analysis read. Positions in problems, fixes and plans are only
+     * valid for that content; anything else could put an edit at the wrong element.
+     */
+    fun isCurrent(path: Path): Boolean {
+        val entry = poms[path]?.entry ?: return false
+        val attrs = try {
+            Files.readAttributes(path, BasicFileAttributes::class.java)
+        } catch (_: IOException) {
+            return false
+        }
+        return attrs.size() == entry.size && attrs.lastModifiedTime().toMillis() == entry.lastModified
+    }
 }
 
 /**
  * Discovers all POMs reachable from the root POMs (modules and parent relativePaths), parses only what changed and
  * re-runs cross-file analyzers only for POMs affected by a change. Not thread-safe; callers serialize access.
  */
-class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION) {
+class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION, private val maxPoms: Int = MAX_POMS) {
     @Volatile
     private var entries: Map<Path, PomEntry> = emptyMap()
     private var workspace: Workspace? = null
@@ -90,9 +104,22 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
         val contentChanged = HashSet<Path>()
         val rootPaths = roots.map { Workspace.pomPath(it) }.distinct()
         val queue = ArrayDeque(rootPaths)
+        // A module folder that links back to an ancestor gives ever longer paths to the same files: follow each real file once.
+        val realPaths = HashSet<Path>()
+        var truncated = false
         while (queue.isNotEmpty()) {
             val path = queue.removeFirst()
             if (path in next || path in missing) continue
+            if (next.size >= maxPoms) {
+                truncated = true
+                break
+            }
+            val real = try {
+                path.toRealPath()
+            } catch (_: Exception) {
+                path
+            }
+            if (!realPaths.add(real)) continue
             val cached = old[path]
             val mustCheck = mode != RefreshMode.INCREMENTAL || cached == null || path in changedPaths
             val entry = if (mustCheck) load(path, cached, counter, force = path in changedPaths) else cached!!.also { counter.reused++ }
@@ -146,6 +173,12 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
         val referencedAsModule = results.values.flatMapTo(HashSet()) { it.modules }
         val displayRoots = (rootPaths.filter { it in next } + next.keys).distinct().filter { it !in referencedAsModule }
 
+        if (truncated) {
+            val first = displayRoots.firstOrNull() ?: next.keys.first()
+            val r = results.getValue(first)
+            val problem = Problem(Severity.ERROR, Category.MULTI_MODULE, "More than $maxPoms POMs are referenced; the rest are not analysed", r.model.gavPos)
+            results[first] = r.copy(problems = listOf(problem) + r.problems)
+        }
         val stats = RefreshStats(mode, next.size, counter.parsed, counter.reused, affected.size, (System.nanoTime() - start) / 1_000_000)
         return AnalysisResult(displayRoots, results, stats)
     }
@@ -213,7 +246,9 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
             return PomEntry(path, size, mtime, "", PomModel.EMPTY, listOf(problem))
         }
         val bytes = try {
-            Files.readAllBytes(path)
+            // Bounded: the file may have grown since its size was checked.
+            Files.newInputStream(path).use { it.readNBytes(PomParser.MAX_BYTES + 1) }
+                .takeIf { it.size <= PomParser.MAX_BYTES } ?: throw IOException("the file grew beyond ${PomParser.MAX_BYTES} bytes")
         } catch (e: IOException) {
             counter.parsed++
             val problem = Problem(Severity.ERROR, Category.XML_SYNTAX, "Cannot read file: ${e.message}", Pos.NONE)
@@ -227,6 +262,11 @@ class AnalysisEngine(private val suite: AnalysisSuite = AnalysisSuite.VALIDATION
         counter.parsed++
         val parsed = PomParser.parse(bytes)
         return PomEntry(path, size, mtime, hash, parsed.model, parsed.problems)
+    }
+
+    companion object {
+        /** More POMs than any real reactor; a bound for crafted module trees. */
+        const val MAX_POMS = 20_000
     }
 
     private fun sha256(bytes: ByteArray): String = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes))

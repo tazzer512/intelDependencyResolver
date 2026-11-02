@@ -50,7 +50,8 @@ object StructureValidator {
             if (parent.childText("groupId").isNullOrEmpty()) error("'parent.groupId' is missing", parent, set(parent, "groupId", null))
             if (parent.childText("artifactId").isNullOrEmpty()) error("'parent.artifactId' is missing", parent, set(parent, "artifactId", null))
             if (parent.childText("version").isNullOrEmpty() && !maven4) error("'parent.version' is missing", parent, set(parent, "version", null))
-            if (model.gav.groupId != null && model.gav.groupId == parent.childText("groupId") &&
+            // An omitted groupId is inherited, so the same artifactId alone already makes the coordinates equal.
+            if (model.effectiveGav.groupId != null && model.effectiveGav.groupId == parent.childText("groupId") &&
                 model.gav.artifactId != null && model.gav.artifactId == parent.childText("artifactId")
             ) {
                 error("Project uses its own coordinates as parent", parent)

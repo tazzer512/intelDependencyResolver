@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.4.21"
     id("org.jetbrains.intellij.platform") version "2.19.0"
+    jacoco
 }
 
 group = "com.github.arjenvanharen"
@@ -73,6 +74,29 @@ fun changeNotes(version: String): Provider<String> =
         }
         html.toString().replace(Regex("`([^`]*)`"), "<code>$1</code>")
     }
+
+// ./gradlew test jacocoTestReport: line/branch coverage of the unit tests in build/reports/jacoco/.
+jacoco {
+    toolVersion = "0.8.14"
+}
+
+tasks.test {
+    // The IntelliJ test class loader defines classes without a code source location; JaCoCo skips those by default.
+    extensions.configure<JacocoTaskExtension> {
+        isIncludeNoLocationClasses = true
+        excludes = listOf("jdk.internal.*")
+    }
+}
+
+tasks.named<JacocoReport>("jacocoTestReport") {
+    dependsOn(tasks.test)
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    // The unit tests cover core/; ide/ needs a running IDE. Tests run against the instrumented classes.
+    classDirectories.setFrom(fileTree(layout.buildDirectory.dir("instrumented/instrumentCode")) { include("**/mavendeps/core/**") })
+}
 
 // ./gradlew bumpVersion -Ppart=major|minor|patch (default patch): raises pluginVersion in gradle.properties.
 val bumpVersion by tasks.registering {

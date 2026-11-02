@@ -37,6 +37,22 @@ object FixRunner {
         if (ReadonlyStatusHandler.getInstance(project).ensureFilesWritable(files.values.filterNotNull()).hasReadonlyFiles()) return
         val docs: Map<Path, Document> = files.mapValues { fdm.getDocument(it.value!!) ?: return Messages.showErrorDialog(project, "Cannot open ${it.key}", title) }
 
+        // Fixes find their elements by the positions of the last analysis. Unsaved edits, or a file changed since, could
+        // put the change at another element with the same position (e.g. the next <dependency>): analyse first.
+        val service = MavenAnalysisService.getInstance(project)
+        val result = service.lastResult
+        val outdated = docs.filter { (path, doc) -> fdm.isDocumentUnsaved(doc) || result?.isCurrent(path) != true }.keys
+        if (outdated.isNotEmpty()) {
+            outdated.forEach { fdm.saveDocument(docs.getValue(it)) }
+            service.requestRefresh(RefreshMode.INCREMENTAL, outdated)
+            return Messages.showInfoMessage(
+                project,
+                "${outdated.joinToString { it.parent.fileName.toString() + "/" + it.fileName }} changed since it was analysed. " +
+                    "It was saved and is being analysed again; apply the change once the analysis has finished.",
+                title,
+            )
+        }
+
         val edits = try {
             FixApplier.edits(combined, fixes.first().first, input) { docs.getValue(it).text }
         } catch (e: FixException) {

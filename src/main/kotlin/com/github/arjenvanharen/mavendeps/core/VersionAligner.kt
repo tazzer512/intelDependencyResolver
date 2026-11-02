@@ -58,7 +58,9 @@ object VersionAligner {
             for (u in r.usages) {
                 if (u.node.status != NodeStatus.INCLUDED || ws.model(u.module) == null) continue
                 val top = ws.ancestry(u.module).chain.lastOrNull() ?: u.module
-                u.node.version?.let { v -> MavenVersion(v).let { mv -> newestBelow.merge(top, mv) { a, b -> maxOf(a, b) } } }
+                // Ranges and unresolved expressions are not versions a pin could use.
+                u.node.version?.takeIf { v -> "\${" !in v && v.none { it in "[](),"} }
+                    ?.let { v -> MavenVersion(v).let { mv -> newestBelow.merge(top, mv) { a, b -> maxOf(a, b) } } }
                 if (!older(u.node.version)) continue
                 // Step 1 already updated the declaration that decides this version: a direct dependency with its own
                 // version, or dependency management in the workspace.

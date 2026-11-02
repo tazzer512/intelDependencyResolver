@@ -20,6 +20,7 @@ import com.intellij.ui.EditorNotificationPanel
 import com.intellij.ui.InlineBanner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.QueryCancelledException
 import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.ide.CommonActionsManager
@@ -308,7 +309,9 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             onProgress = { progress.job(it) },
             onFailure = {
                 loading = false
-                status.text = "Resolving failed: ${it.message}"
+                // Resolve again the next time the tab is shown.
+                stale = true
+                status.text = if (it is QueryCancelledException) "Resolving cancelled" else "Resolving failed: ${it.message}"
             },
         ) {
             loading = false
@@ -446,12 +449,18 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             status.text = "Not in ${service.repository.root}: ${c.groupId}:${c.artifactId}:$version"
             return false
         }
-        return open(pom, 1)
+        // Whether a repository POM exists is checked off the EDT, where Navigation also opens it.
+        val shown = "${c.groupId}:${c.artifactId}:$version"
+        ApplicationManager.getApplication().executeOnPooledThread {
+            if (Files.isRegularFile(pom)) Navigation.open(project, pom, 1)
+            else ApplicationManager.getApplication().invokeLater({ status.text = "Not in ${service.repository.root}: $shown" }, project.disposed)
+        }
+        return true
     }
 
+    /** The workspace POM, else where the repository POM would be (it may be missing). */
     private fun artifactPom(groupId: String, artifactId: String, version: String): Path? =
-        loaded?.resolver?.workspacePom(groupId, artifactId, version)
-            ?: service.repository.pomPath(groupId, artifactId, version)?.takeIf { Files.isRegularFile(it) }
+        loaded?.resolver?.workspacePom(groupId, artifactId, version) ?: service.repository.pomPath(groupId, artifactId, version)
 
     /**
      * Where the selected dependency is declared: the module POM (or its parent) for a direct dependency, otherwise the

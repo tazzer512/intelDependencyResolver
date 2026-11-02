@@ -1,7 +1,13 @@
 package com.github.arjenvanharen.mavendeps.ide.ui
 
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
+import com.github.arjenvanharen.mavendeps.core.ArtifactVersion
+import com.github.arjenvanharen.mavendeps.core.ClassIndex
+import com.github.arjenvanharen.mavendeps.core.CodeImpact
+import com.github.arjenvanharen.mavendeps.core.CodeImpactAnalyzer
+import com.github.arjenvanharen.mavendeps.core.Impact
 import com.github.arjenvanharen.mavendeps.core.DependencyIndex
+import com.github.arjenvanharen.mavendeps.core.FixReport
 import com.github.arjenvanharen.mavendeps.core.Library
 import com.github.arjenvanharen.mavendeps.core.LibraryUsage
 import com.github.arjenvanharen.mavendeps.core.ScanResult
@@ -12,17 +18,21 @@ import com.github.arjenvanharen.mavendeps.core.Vulnerability
 import com.github.arjenvanharen.mavendeps.core.VulnerableArtifact
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisListener
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.QueryCancelledException
 import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
 import com.intellij.ide.CommonActionsManager
 import com.intellij.ide.DefaultTreeExpander
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ToggleAction
+import com.intellij.openapi.actionSystem.ex.CheckboxAction
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
@@ -47,6 +57,7 @@ import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.tree.TreeUtil
 import java.awt.BorderLayout
 import java.awt.Color
+import java.awt.datatransfer.StringSelection
 import java.awt.event.MouseEvent
 import java.nio.file.Path
 import javax.swing.Icon
@@ -69,7 +80,10 @@ private class UsedByItem(val usage: LibraryUsage) {
     override fun toString() = usage.module.toString() + ":" + usage.node.chain.joinToString { it.label }
 }
 
-private class Scan(val analysis: AnalysisResult, val result: ScanResult, val libraries: Map<String, Library>)
+private class Scan(val analysis: AnalysisResult, val result: ScanResult, val libraries: Map<String, Library>) {
+    /** Whether the code reaches each advisory's vulnerable classes, by artifact and advisory id; null until checked. */
+    var impacts: Map<Pair<ArtifactVersion, String>, CodeImpact>? = null
+}
 
 /**
  * Checks every resolved dependency of every module, direct and transitive, against the OSV vulnerability database
@@ -97,6 +111,14 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
     private var scan: Scan? = null
     private var scanning = false
     private var hideTestScopes = false
+    private val properties get() = PropertiesComponent.getInstance(project)
+
+    /** "Code is affected by CVE": check whether the project's code reaches the vulnerable classes. */
+    private var checkImpact: Boolean
+        get() = properties.getBoolean(CHECK_IMPACT_KEY, false)
+        set(value) = properties.setValue(CHECK_IMPACT_KEY, value, false)
+    private var checkingImpact = false
+    private val classIndex = ClassIndex()
 
     init {
         tree.isRootVisible = false
@@ -160,7 +182,32 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                 }
                 override fun actionPerformed(e: AnActionEvent) = fix(visibleArtifacts())
             })
+            add(object : DumbAwareAction(
+                "Copy Fix Report for AI",
+                "Copy a short text report of the vulnerabilities to fix (only those that impact the code when " +
+                    "'Code is affected by CVE' is on), ready to paste into an AI assistant",
+                AllIcons.Actions.Copy,
+            ) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun update(e: AnActionEvent) {
+                    e.presentation.isEnabled = scan != null && !(checkImpact && (checkingImpact || scan?.impacts == null) && visibleArtifacts().isNotEmpty())
+                }
+                override fun actionPerformed(e: AnActionEvent) = copyReport()
+            })
             addSeparator()
+            add(object : CheckboxAction(
+                "Code is affected by CVE",
+                "Check whether the project's code (and the libraries it uses) reaches the vulnerable classes of each advisory. " +
+                    "Runs locally on the sources and the jars in ~/.m2; advisories that cannot be reached are flagged 'Does not impact code'.",
+                null,
+            ), DumbAware {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = checkImpact
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    checkImpact = state
+                    if (state && scan?.impacts == null) analyzeImpact() else rebuild()
+                }
+            })
             add(object : ToggleAction("Hide Test and Provided Scopes", "Hide vulnerabilities only reached through test or provided dependencies", AllIcons.Nodes.Test), DumbAware {
                 override fun getActionUpdateThread() = ActionUpdateThread.EDT
                 override fun isSelected(e: AnActionEvent) = hideTestScopes
@@ -204,15 +251,62 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             onProgress = { progress.job(it) },
             onFailure = {
                 scanning = false
-                status.text = "Scan failed: ${it.message ?: it.javaClass.simpleName} (is osv.dev reachable? Proxy settings: Settings | HTTP Proxy)"
+                status.text = if (it is QueryCancelledException) "Scan cancelled"
+                else "Scan failed: ${it.message ?: it.javaClass.simpleName} (is osv.dev reachable? Proxy settings: Settings | HTTP Proxy)"
             },
         ) {
             scanning = false
             scan = it
             staleBanner.isVisible = service.lastResult !== it.analysis
             rebuild()
+            if (checkImpact) analyzeImpact()
         }
     }
+
+    /** Checks, for every advisory of the current scan, whether the code reaches its vulnerable classes. Local only. */
+    private fun analyzeImpact() {
+        val s = scan ?: return
+        if (checkingImpact || s.result.vulnerable.isEmpty()) return
+        checkingImpact = true
+        status.text = "Checking whether the code is affected…"
+        service.runQuery(
+            "Checking whether the code is affected by vulnerabilities",
+            { p ->
+                val resolver = service.resolver()
+                CodeImpactAnalyzer(service.repository, classIndex).analyze(s.result.vulnerable, s.libraries.values, resolver::workspacePom, p) { done, total, phase ->
+                    p.report(done.toDouble() / maxOf(total, 1), "$phase ($done of $total)")
+                }
+            },
+            onProgress = { progress.job(it) },
+            onFailure = {
+                checkingImpact = false
+                status.text = if (it is QueryCancelledException) "Code impact check cancelled" else "Code impact check failed: ${it.message ?: it.javaClass.simpleName}"
+            },
+        ) {
+            checkingImpact = false
+            s.impacts = it
+            if (scan === s) rebuild()
+        }
+    }
+
+    /** Copies a plain-text fix brief of the visible vulnerabilities to the clipboard. */
+    private fun copyReport() {
+        val base = project.basePath?.let { Path.of(it) }
+        val impacts = if (checkImpact) scan?.impacts else null
+        val report = FixReport.render(
+            visibleArtifacts(),
+            impacts,
+            { p -> if (base != null && p.startsWith(base)) base.relativize(p).joinToString("/") else p.toString() },
+            ::moduleName,
+        )
+        CopyPasteManager.getInstance().setContents(StringSelection(report))
+        val listed = report.lines().count { it.startsWith("## ") }
+        status.text = "Fix report copied: $listed librar${if (listed == 1) "y" else "ies"} to fix" +
+            if (impacts != null) " (only advisories that impact the code)" else " (code impact not checked: all advisories)"
+    }
+
+    /** The code impact of [v] on [a], when the check is enabled and has run. */
+    private fun impact(a: VulnerableArtifact, v: Vulnerability): CodeImpact? = if (checkImpact) scan?.impacts?.get(a.artifact to v.id) else null
 
     private fun passes(u: LibraryUsage) = !hideTestScopes || u.node.scope !in setOf("test", "provided")
 
@@ -244,8 +338,18 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             artifacts.sumOf { a -> a.vulnerabilities.count { it.severity == sev } }.takeIf { it > 0 }?.let { "$it ${sev.displayName.lowercase()}" }
         }
         val transitive = artifacts.count { !it.direct }
+        val impacts = artifacts.flatMap { a -> a.vulnerabilities.mapNotNull { impact(a, it) } }
+        val impactText = when {
+            !checkImpact || artifacts.isEmpty() -> ""
+            checkingImpact || s.impacts == null -> " · checking code impact…"
+            else -> " · " + listOfNotNull(
+                impacts.count { it.impact == Impact.AFFECTED }.let { "$it impact code" },
+                impacts.count { it.impact == Impact.NOT_AFFECTED }.let { "$it do not" },
+                impacts.count { it.impact == Impact.UNKNOWN }.takeIf { it > 0 }?.let { "$it unknown" },
+            ).joinToString(", ")
+        }
         status.text = "${s.result.scanned} artifact versions scanned · ${artifacts.size} vulnerable ($transitive only transitive)" +
-            (if (counts.isNotEmpty()) " · " + counts.joinToString(", ") else "") + " · data: osv.dev"
+            (if (counts.isNotEmpty()) " · " + counts.joinToString(", ") else "") + impactText + " · data: osv.dev"
     }
 
     private fun selected(): Any? = (tree.selectionPath?.lastPathComponent as? DefaultMutableTreeNode)?.userObject
@@ -301,6 +405,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
     private fun onLink(link: String) {
         when {
             link == "fix" -> selectedArtifact()?.let { fix(listOf(it)) }
+            link == "recheck" -> scan?.let { it.impacts = null; analyzeImpact() }
             link.startsWith("http://") || link.startsWith("https://") -> BrowserUtil.browse(link)
         }
     }
@@ -331,7 +436,8 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
     private fun artifactDetails(a: VulnerableArtifact): String = buildString {
         append("<html><body><h3>${esc(a.artifact.toString())}</h3><table>")
         append(row("Vulnerabilities", a.vulnerabilities.joinToString("<br>") { v ->
-            "${severityHtml(v)} <a href='${esc(v.url)}'>${esc(v.cve ?: v.id)}</a> ${esc(v.summary)}"
+            "${severityHtml(v)} <a href='${esc(v.url)}'>${esc(v.cve ?: v.id)}</a> ${esc(v.summary)}" +
+                (impact(a, v)?.let { " <i style='color:#${ColorUtil.toHex(impactColor(it.impact))}'>${impactLabel(it.impact)}</i>" } ?: "")
         }))
         append(row("Used", if (a.direct) "directly declared" + if (a.usages.any { it.node.depth > 1 }) " and transitively" else "" else "only transitively"))
         append(row("Modules", a.modules.joinToString(", ") { esc(moduleName(it)) }))
@@ -359,6 +465,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         val fixes = v.fixedIn[a.artifact.ga].orEmpty()
         append(row("Fixed in", fixes.joinToString(", ") { esc(it) }.ifEmpty { "<i>no fixed version known</i>" }))
         v.published?.let { append(row("Published", esc(it.take(10)))) }
+        impact(a, v)?.let { append(row("Code", impactHtml(it, a))) }
         append("</table><p><a href='${esc(v.url)}'>Open on osv.dev</a></p>")
         if (v.references.isNotEmpty()) {
             append("<p style='color:gray'>References</p><p>")
@@ -366,6 +473,33 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             append("</p>")
         }
         append("</body></html>")
+    }
+
+    private fun impactHtml(i: CodeImpact, a: VulnerableArtifact): String = buildString {
+        append("<b style='color:#${ColorUtil.toHex(impactColor(i.impact))}'>${impactLabel(i.impact)}</b><br>")
+        val scope = if (i.namedClasses.isEmpty()) {
+            "The advisory names no class of ${esc(a.artifact.toString())}, so all of its classes count as vulnerable."
+        } else {
+            "Vulnerable classes named by the advisory: " + i.namedClasses.take(10).joinToString(", ") { "<code>${esc(it.substringAfterLast('.'))}</code>" } +
+                (if (i.namedClasses.size > 10) " …" else "") +
+                " (${i.surfaceSize} class${if (i.surfaceSize == 1) "" else "es"} of the library lead to them)."
+        }
+        append(scope)
+        when (i.impact) {
+            Impact.AFFECTED -> {
+                append("<br>Referenced from:<br>")
+                append(i.evidence.joinToString("<br>") { "&nbsp;&nbsp;• ${esc(it)}" })
+            }
+            Impact.NOT_AFFECTED -> append(
+                "<br>Neither the modules' code nor any library on their classpath references them. " +
+                    "<span style='color:gray'>Classes loaded purely by reflection are not seen.</span>",
+            )
+            Impact.UNKNOWN -> {
+                append("<br>Not referenced where it could be checked, but:<br>")
+                append(i.reasons.joinToString("<br>") { "&nbsp;&nbsp;• ${esc(it)}" })
+            }
+        }
+        append("<br><a href='recheck'>Check again</a> <span style='color:gray'>(after code changes)</span>")
     }
 
     private fun usageDetails(u: LibraryUsage): String = buildString {
@@ -387,6 +521,15 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                     append(":${a.artifact.version}")
                     val bySeverity = a.vulnerabilities.groupingBy { it.severity }.eachCount().toSortedMap()
                     for ((sev, n) in bySeverity) append("  $n ${sev.displayName.lowercase()}", attributes(sev))
+                    val impacts = a.vulnerabilities.mapNotNull { impact(a, it) }
+                    if (impacts.size == a.vulnerabilities.size) {
+                        val affected = impacts.count { it.impact == Impact.AFFECTED }
+                        when {
+                            impacts.all { it.impact == Impact.NOT_AFFECTED } -> append("  ${impactLabel(Impact.NOT_AFFECTED)}", impactAttributes(Impact.NOT_AFFECTED))
+                            affected > 0 -> append("  $affected of ${impacts.size} impact code", impactAttributes(Impact.AFFECTED))
+                            else -> append("  ${impactLabel(Impact.UNKNOWN)}", impactAttributes(Impact.UNKNOWN))
+                        }
+                    }
                     append(if (a.direct) "  direct" else "  transitive", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
                     append("  ${a.modules.size} module${if (a.modules.size == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     a.fixVersion?.let { append("  fix: $it", FIX_ATTRIBUTES) } ?: append("  no fix yet", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
@@ -397,6 +540,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                     append(v.cve ?: v.id, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                     if (v.cve != null && v.cve != v.id) append("  ${v.id}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     append("  ${v.severity.displayName}" + (v.score?.let { " $it" } ?: ""), attributes(v.severity))
+                    impact(data.artifact, v)?.let { append("  ${impactLabel(it.impact)}", impactAttributes(it.impact)) }
                     append("  ${v.summary}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                     v.fixFor(data.artifact.artifact.ga, data.artifact.artifact.version)?.let { append("  fixed in $it", FIX_ATTRIBUTES) }
                 }
@@ -417,6 +561,22 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         private val MEDIUM_COLOR: Color = JBColor(0xB7791F, 0xE5C07B)
         private val LOW_COLOR: Color = JBColor(0x5C6B7A, 0x9AA7B0)
         private val FIX_ATTRIBUTES = SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER, JBColor(0x3C8C40, 0x6AAB73))
+        private val NOT_AFFECTED_COLOR: Color = JBColor(0x3C8C40, 0x6AAB73)
+        private const val CHECK_IMPACT_KEY = "mavendeps.security.checkCodeImpact"
+
+        fun impactLabel(i: Impact) = when (i) {
+            Impact.AFFECTED -> "Impacts code"
+            Impact.NOT_AFFECTED -> "Does not impact code"
+            Impact.UNKNOWN -> "Impact on code unknown"
+        }
+
+        fun impactColor(i: Impact): Color = when (i) {
+            Impact.AFFECTED -> CRITICAL_COLOR
+            Impact.NOT_AFFECTED -> NOT_AFFECTED_COLOR
+            Impact.UNKNOWN -> LOW_COLOR
+        }
+
+        private fun impactAttributes(i: Impact) = SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, impactColor(i))
 
         fun color(s: VulnSeverity): Color = when (s) {
             VulnSeverity.CRITICAL -> CRITICAL_COLOR

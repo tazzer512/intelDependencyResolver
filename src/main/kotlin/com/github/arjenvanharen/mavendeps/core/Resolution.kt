@@ -34,6 +34,16 @@ class LocalRepository(val root: Path) {
         return artifactDir(groupId, artifactId)?.resolve(version)?.resolve("$artifactId-$version.pom")
     }
 
+    /**
+     * Where the file of an artifact lives (`<artifactId>-<version>[-<classifier>].<extension>`), or null when the
+     * coordinates cannot name a file in the repository.
+     */
+    fun artifactPath(groupId: String, artifactId: String, version: String, classifier: String? = null, extension: String = "jar"): Path? {
+        if (!isSafeSegment(version) || !isSafeSegment(extension) || (classifier != null && !isSafeSegment(classifier))) return null
+        val name = "$artifactId-$version" + (classifier?.let { "-$it" } ?: "") + ".$extension"
+        return artifactDir(groupId, artifactId)?.resolve(version)?.resolve(name)?.normalize()?.takeIf { it.startsWith(root.normalize()) }
+    }
+
     fun pom(groupId: String, artifactId: String, version: String): PomModel? {
         val file = pomPath(groupId, artifactId, version) ?: return null
         val attrs = try {
@@ -49,6 +59,8 @@ class LocalRepository(val root: Path) {
         } catch (_: Exception) {
             null
         }
+        // Bounded: the repository service lives as long as the project and would otherwise keep every POM it ever read.
+        if (cache.size >= MAX_CACHED) cache.clear()
         cache[file] = Cached(attrs.size(), attrs.lastModifiedTime().toMillis(), model)
         return model
     }
@@ -74,6 +86,8 @@ class LocalRepository(val root: Path) {
     }
 
     companion object {
+        private const val MAX_CACHED = 20_000
+
         /** `-Dmaven.repo.local`, else `<localRepository>` from `~/.m2/settings.xml`, else `~/.m2/repository`. */
         fun default(): LocalRepository {
             System.getProperty("maven.repo.local")?.takeIf { it.isNotBlank() }?.let { return LocalRepository(Paths.get(it)) }
@@ -190,6 +204,9 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
 
     private val building = HashSet<Path>()
 
+    /** Nesting of BOM imports being built; each level recurses, so crafted chains must not overflow the stack. */
+    private var importDepth = 0
+
     /** The effective model of a workspace POM. */
     fun effective(path: Path): EffectiveModel = workspaceModels[path] ?: run {
         // A BOM import cycle inside the workspace: Maven fails the build; here the import is simply ignored.
@@ -199,8 +216,9 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
         ws.ancestry(path).chain.forEach { chain += ws.model(it)!! to it }
         // Continue outside the workspace through the repository, e.g. for spring-boot-starter-parent.
         extendFromRepository(chain)
-        build(chain, HashSet()).also {
-            workspaceModels[path] = it
+        try {
+            build(chain, HashSet()).also { workspaceModels[path] = it }
+        } finally {
             building.remove(path)
         }
     }
@@ -286,8 +304,13 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
             }
         }
         for ((g, a, v) in imports) {
-            if (!importing.add("$g:$a:$v")) continue
-            val bom = byGav["$g:$a:$v"]?.let { effective(it) } ?: effectiveFromRepository(g, a, v, importing)
+            if (!importing.add("$g:$a:$v") || importDepth >= MAX_IMPORT_DEPTH) continue
+            importDepth++
+            val bom = try {
+                byGav["$g:$a:$v"]?.let { effective(it) } ?: effectiveFromRepository(g, a, v, importing)
+            } finally {
+                importDepth--
+            }
             bom?.managed?.forEach { (k, md) -> managed.putIfAbsent(k, md) }
         }
 
@@ -362,6 +385,11 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
             }
         }
         return DependencyTree(module, roots, missing)
+    }
+
+    companion object {
+        /** Far deeper than real BOM hierarchies (Spring Boot nests three or four). */
+        const val MAX_IMPORT_DEPTH = 32
     }
 
     private fun matches(pattern: String, dep: EffectiveDependency): Boolean {

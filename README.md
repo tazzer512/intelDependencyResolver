@@ -52,6 +52,17 @@ Open the **Maven Analyzer** tool window to get started.
   vulnerable library comes in through.
 - **Fix All Vulnerabilities…** upgrades every vulnerable library to the lowest version that fixes its known
   vulnerabilities. It works like conflict resolution, so transitive-only libraries are fixed too.
+- **Code is affected by CVE** (checkbox): checks whether your code can reach the vulnerable code. The classes an
+  advisory names, plus every class of the library that uses them, count as vulnerable. If the advisory names no class,
+  the whole library counts. A module is affected when its sources, compiled classes, configuration files, workspace
+  modules it depends on, or any library on its classpath reference one of those classes. Every advisory stays listed;
+  unreachable ones are flagged **Does not impact code**, and the details show where reachable ones are referenced.
+  When a jar is missing from `~/.m2` the impact is reported as unknown rather than guessed. The check runs locally and
+  is static: classes loaded only by reflection from computed names are not seen.
+- **Copy Fix Report for AI** copies a short plain-text brief to paste into an AI assistant or a ticket. For each
+  library to fix it lists the CVEs, the fix version, the POM and line that bring the library in, and the code that uses
+  the vulnerable classes, plus rules for the upgrade. With **Code is affected by CVE** on, only advisories that impact
+  the code are included; the others are listed at the end as left out.
 - **Privacy:** a scan runs only when you click **Scan**. It sends only `groupId:artifactId:version` of each
   dependency, using the IDE's proxy settings.
 

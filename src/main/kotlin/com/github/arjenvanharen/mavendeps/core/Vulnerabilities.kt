@@ -24,6 +24,10 @@ data class Vulnerability(
     val published: String?,
     val modified: String?,
     val references: List<String>,
+    /** The full advisory text (markdown). */
+    val details: String = "",
+    /** Strings from the advisory's ecosystem- or database-specific data, which may name vulnerable classes or functions. */
+    val symbols: List<String> = emptyList(),
 ) {
     val cve: String? get() = (listOf(id) + aliases).firstOrNull { it.startsWith("CVE-") }
     val url: String get() = "https://osv.dev/vulnerability/$id"
@@ -88,9 +92,10 @@ class OsvClient(private val transport: OsvTransport, private val baseUrl: String
             for ((i, r) in results.withIndex()) {
                 val artifact = chunk.getOrNull(i) ?: break
                 collect(r, ids.getOrPut(artifact) { LinkedHashMap() })
-                // Rare: more advisories than fit one page.
+                // Rare: more advisories than fit one page. Bounded, in case the server keeps returning a token.
                 var token = r.str("next_page_token")
-                while (token != null) {
+                var pages = 0
+                while (token != null && pages++ < MAX_PAGES) {
                     checkCanceled()
                     val page = Json.parse(transport.post("$baseUrl/query", query(artifact, token)))
                     collect(page, ids.getValue(artifact))
@@ -109,7 +114,8 @@ class OsvClient(private val transport: OsvTransport, private val baseUrl: String
             (pageToken?.let { ",\"page_token\":${Json.quote(it)}" } ?: "") + "}"
 
     private fun collect(result: Any?, into: MutableMap<String, String?>) {
-        for (v in result.arr("vulns")) v.str("id")?.let { into[it] = v.str("modified") }
+        // Ids become part of a URL path: only accept what advisory ids look like (GHSA-…, CVE-…, PYSEC-…).
+        for (v in result.arr("vulns")) v.str("id")?.takeIf { ID.matches(it) }?.let { into[it] = v.str("modified") }
     }
 
     private fun fetch(ids: List<String>, checkCanceled: () -> Unit, progress: (Int) -> Unit) {
@@ -135,15 +141,20 @@ class OsvClient(private val transport: OsvTransport, private val baseUrl: String
     companion object {
         private const val BATCH = 500
         private const val PARALLEL = 8
+        private const val MAX_PAGES = 100
+        private val ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
         /** An OSV vulnerability record. */
         fun parse(json: Any?): Vulnerability {
             val id = json.str("id") ?: throw IllegalArgumentException("Advisory without id")
             val fixed = LinkedHashMap<String, MutableList<String>>()
+            val symbols = ArrayList<String>()
             for (affected in json.arr("affected")) {
                 val pkg = affected.obj("package")
                 if (pkg.str("ecosystem") != "Maven") continue
                 val name = pkg.str("name") ?: continue
+                strings(affected.obj("ecosystem_specific"), symbols)
+                strings(affected.obj("database_specific"), symbols)
                 for (range in affected.arr("ranges")) for (event in range.arr("events")) {
                     event.str("fixed")?.let { fixed.getOrPut(name) { ArrayList() }.add(it) }
                 }
@@ -167,7 +178,22 @@ class OsvClient(private val transport: OsvTransport, private val baseUrl: String
                 published = json.str("published"),
                 modified = json.str("modified"),
                 references = json.arr("references").mapNotNull { it.str("url") },
+                details = json.str("details")?.take(MAX_DETAILS) ?: "",
+                symbols = symbols.distinct().take(MAX_SYMBOLS),
             )
+        }
+
+        private const val MAX_DETAILS = 64 * 1024
+        private const val MAX_SYMBOLS = 500
+
+        /** Every string value in [json], depth-first. */
+        private fun strings(json: Any?, into: MutableList<String>, depth: Int = 0) {
+            if (depth > 8 || into.size >= MAX_SYMBOLS) return
+            when (json) {
+                is String -> if (json.length <= 300) into += json
+                is Map<*, *> -> json.values.forEach { strings(it, into, depth + 1) }
+                is List<*> -> json.forEach { strings(it, into, depth + 1) }
+            }
         }
     }
 }

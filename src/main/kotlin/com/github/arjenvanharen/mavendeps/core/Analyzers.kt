@@ -246,6 +246,8 @@ object RepeatedVersionAnalyzer : GlobalAnalyzer {
             .fold(LinkedHashMap<String, String>()) { acc, p -> acc.apply { putAll(ws.model(p)!!.properties) } }
         val existing = visible.entries.firstOrNull { it.value == version && it.key.endsWith("version", ignoreCase = true) }?.key
         val name = existing ?: freshName(ws, definer, groupId, occurrences, visible)
+        // e.g. an artifactId starting with a digit: the fix could not be applied.
+        if (!PomParser.isElementName(name)) return
 
         val parts = ArrayList<QuickFix>()
         if (existing == null) parts += DefineProperty("Define $name", definer, name, version)

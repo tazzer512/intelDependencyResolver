@@ -184,17 +184,46 @@ class Workspace(val entries: Map<Path, PomEntry>) {
             var result = value
             repeat(10) {
                 if (!result.contains("\${")) return result
-                var changed = false
-                for (name in PomParser.referencedProperties(result)) {
-                    val replacement = props[name] ?: continue
-                    result = result.replace("\${$name}", replacement)
-                    changed = true
-                    // Self-amplifying definitions (a = ${b}${b}, b = ${c}${c}, ...) must not exhaust memory.
-                    if (result.length > MAX_INTERPOLATED_LENGTH) return result
-                }
-                if (!changed) return result
+                val next = substituteOnce(result, props) ?: return result
+                result = next
+                // Self-amplifying definitions (a = ${b}${b}, b = ${c}${c}, ...) must not exhaust memory.
+                if (result.length >= MAX_INTERPOLATED_LENGTH) return result
             }
             return result
+        }
+
+        /**
+         * One pass replacing every defined `${name}`; null when nothing was defined. The output is built in a bounded
+         * buffer: many references to one large value must not allocate gigabytes before a length check can run.
+         */
+        private fun substituteOnce(text: String, props: Map<String, String>): String? {
+            val out = StringBuilder()
+            var changed = false
+            var i = 0
+            while (i < text.length) {
+                val start = text.indexOf("\${", i)
+                val end = if (start < 0) -1 else text.indexOf('}', start + 2)
+                if (start < 0 || end < 0) {
+                    appendBounded(out, text, i, text.length)
+                    break
+                }
+                appendBounded(out, text, i, start)
+                val name = text.substring(start + 2, end).trim()
+                val replacement = if ("\${" in name) null else props[name]
+                if (replacement != null) {
+                    appendBounded(out, replacement, 0, replacement.length)
+                    changed = true
+                } else {
+                    appendBounded(out, text, start, end + 1)
+                }
+                if (out.length >= MAX_INTERPOLATED_LENGTH) break
+                i = end + 1
+            }
+            return if (changed) out.toString() else null
+        }
+
+        private fun appendBounded(out: StringBuilder, s: String, from: Int, to: Int) {
+            out.append(s, from, minOf(to, from + (MAX_INTERPOLATED_LENGTH - out.length).coerceAtLeast(0)))
         }
 
         /** Unresolved expressions (e.g. CI-friendly `${revision}`) are treated as compatible. */

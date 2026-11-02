@@ -18,7 +18,8 @@ class XNode(val name: String, val pos: Pos, val parent: XNode?) {
     val attributes = LinkedHashMap<String, String>()
     internal val textBuilder = StringBuilder()
 
-    val text: String get() = textBuilder.toString().trim()
+    /** Read only after parsing, so it is computed once; validation and extraction ask for it many times. */
+    val text: String by lazy(LazyThreadSafetyMode.NONE) { textBuilder.toString().trim() }
 
     fun child(name: String): XNode? = children.firstOrNull { it.name == name }
 

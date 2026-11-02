@@ -15,8 +15,11 @@ object DependencySnippet {
     private val dependency = Regex("<dependency\\b[^>]*>(.*?)(</dependency>|(?=<dependency\\b)|$)", RegexOption.DOT_MATCHES_ALL)
     private val coordinates = Regex("""[A-Za-z0-9_.\-]+:[A-Za-z0-9_.\-]+(:[A-Za-z0-9_.\-${'$'}{}]+)*""")
 
+    private val tags = HashMap<String, Regex>()
+
     private fun tag(xml: String, name: String): String? =
-        Regex("<$name>\\s*(.*?)\\s*</$name>", RegexOption.DOT_MATCHES_ALL).find(xml)?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
+        synchronized(tags) { tags.getOrPut(name) { Regex("<$name>\\s*(.*?)\\s*</$name>", RegexOption.DOT_MATCHES_ALL) } }
+            .find(xml)?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
 
     /** Every dependency in [text], in order; empty when nothing recognisable was found. */
     fun parse(text: String): List<Coordinates> {

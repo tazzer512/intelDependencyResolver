@@ -1,5 +1,7 @@
 package com.github.arjenvanharen.mavendeps.ide.ui
 
+import com.github.arjenvanharen.mavendeps.core.Workspace
+import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.Coordinates
 import com.github.arjenvanharen.mavendeps.core.DeclaredHit
 import com.github.arjenvanharen.mavendeps.core.DependencyQuery
@@ -12,6 +14,7 @@ import com.github.arjenvanharen.mavendeps.core.SearchResult
 import com.github.arjenvanharen.mavendeps.core.TransitiveHit
 import com.github.arjenvanharen.mavendeps.core.VersionUpdatePlanner
 import com.github.arjenvanharen.mavendeps.ide.MavenAnalysisService
+import com.github.arjenvanharen.mavendeps.ide.QueryCancelledException
 import com.github.arjenvanharen.mavendeps.ide.Navigation
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.project.Project
@@ -151,6 +154,15 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
      * Fills the fields from the pasted text. A `${property}` version is replaced by its value in the workspace; when
      * the modules disagree or nobody defines it, the version is left empty so every version is found.
      */
+    /** Runs on every keystroke in the paste box: one workspace per analysis, so its property caches are reused. */
+    private var pasteWorkspace: Pair<AnalysisResult?, Workspace>? = null
+
+    private fun pasteWorkspace(): Workspace {
+        val result = service.lastResult
+        pasteWorkspace?.takeIf { it.first === result }?.let { return it.second }
+        return service.workspace().also { pasteWorkspace = result to it }
+    }
+
     private fun fillFromPaste(): Boolean {
         val text = pasteArea.text
         if (text.isBlank()) return false
@@ -161,7 +173,11 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
             return false
         }
         val raw = first.version
-        val values = raw?.let { DependencySnippet.resolveVersion(service.workspace(), it) }.orEmpty()
+        val values = when {
+            raw == null -> emptyList()
+            "\${" !in raw -> listOf(raw)
+            else -> DependencySnippet.resolveVersion(pasteWorkspace(), raw)
+        }
         setFields(first.copy(version = values.singleOrNull()))
         val more = if (found.size > 1) " (first of ${found.size} dependencies)" else ""
         status.text = "Parsed ${first.groupId}:${first.artifactId}$more" + when {
@@ -193,7 +209,7 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         service.runQuery("Searching for $query", { check ->
             val resolver = service.resolver()
             DependencySearch.search(resolver.ws, resolver, query, check)
-        }) { show(it) }
+        }, onFailure = { status.text = if (it is QueryCancelledException) "Search cancelled" else "Search failed: ${it.message}" }) { show(it) }
     }
 
     private fun show(result: SearchResult) {
@@ -237,8 +253,18 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
             return
         }
         val from = query.version?.takeIf { "*" !in it }
-        // Offer the versions already in the local repository, newest first; any other version can be typed.
-        val local = service.repository.versions(query.groupId, query.artifactId).reversed()
+        // Listing ~/.m2 is file I/O (possibly on a network home): not on the EDT.
+        status.text = "Reading versions from the local repository…"
+        service.runQuery(
+            "Reading local versions of ${query.groupId}:${query.artifactId}",
+            { service.repository.versions(query.groupId, query.artifactId).reversed() },
+            onFailure = { status.text = "Could not read the local repository: ${it.message}" },
+        ) { local -> chooseVersion(query, from, local) }
+    }
+
+    /** Asks for the new version, offering [local] (newest first), then plans and applies the update. */
+    private fun chooseVersion(query: DependencyQuery, from: String?, local: List<String>) {
+        status.text = " "
         val message = "New version for ${query.groupId}:${query.artifactId}" + (from?.let { " (currently $it)" } ?: " (all current versions)") +
             if (local.isNotEmpty()) "\nVersions in the local repository are listed; you can also type one." else ""
         val to = (
@@ -249,7 +275,7 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
         service.runQuery("Planning update of ${query.groupId}:${query.artifactId}", { check ->
             val resolver = service.resolver()
             VersionUpdatePlanner.plan(resolver.ws, resolver, query.groupId, query.artifactId, from, to, check)
-        }) { items ->
+        }, onFailure = { status.text = if (it is QueryCancelledException) "Update cancelled" else "Planning failed: ${it.message}" }) { items ->
             if (items.isEmpty()) {
                 status.text = "Nothing to change: no declaration of ${query.groupId}:${query.artifactId}${from?.let { ":$it" } ?: ""} found"
                 return@runQuery
