@@ -5,6 +5,8 @@ The section of the current `pluginVersion` becomes the plugin's change notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
 ### Added
 - Security tab: when no newer version fixes a library's vulnerabilities, the scan finds the newest older release
   without known vulnerabilities (checked against osv.dev; candidates from Maven Central and `~/.m2`). The library
