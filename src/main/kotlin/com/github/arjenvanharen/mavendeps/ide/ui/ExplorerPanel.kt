@@ -572,7 +572,7 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 "Declarations (or the property they use) are updated. Modules that only get an older version transitively get the " +
                 "newest one pinned in &lt;dependencyManagement&gt; of their root POM. Versions are never lowered.</html>"
             val applied = PlanDialog.reviewAndApply(project, title, header, items)
-            status.text = if (applied == null) "Resolving cancelled" else "Applied $applied change${if (applied == 1) "" else "s"}; the trees are resolved again after the analysis"
+            status.text = if (applied == null) "Resolving cancelled" else "Checking $applied change${if (applied == 1) "" else "s"} for new problems, then applying; the trees are resolved again after the analysis"
         }
     }
 

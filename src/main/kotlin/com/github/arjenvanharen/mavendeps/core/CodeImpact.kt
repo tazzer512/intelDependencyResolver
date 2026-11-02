@@ -281,13 +281,28 @@ class CodeImpactAnalyzer(private val repo: LocalRepository, private val index: C
  */
 open class ClassIndex {
     /** Classes defined by a jar and the classes its code (and its configuration resources) references. */
-    class Summary(val defined: Set<String>, val references: Set<String>, val complete: Boolean)
+    class Summary(
+        val defined: Set<String>,
+        val references: Set<String>,
+        val complete: Boolean,
+        /**
+         * Configuration that makes something load the jar's classes without any reference in code: `META-INF/services`
+         * entries, Spring factories and auto-configuration imports (their file names, e.g. a service interface).
+         */
+        val runtimeHooks: Set<String> = emptySet(),
+    )
 
     /** Per class of a jar, the classes it references; providers per service interface from `META-INF/services`. */
     class Graph(val classes: Map<String, Set<String>>, val services: Map<String, List<String>>, val complete: Boolean)
 
     /** References found in a module's sources or compiled classes, with the first place each was seen. */
-    class Code(val classes: Map<String, String>, val packages: Map<String, String>, val complete: Boolean)
+    class Code(
+        val classes: Map<String, String>,
+        val packages: Map<String, String>,
+        val complete: Boolean,
+        /** Code files read: sources in [sources], class files in [compiled]. */
+        val files: Int = 0,
+    )
 
     private class Stamped<T>(val size: Long, val mtime: Long, val value: T)
 
@@ -302,7 +317,7 @@ open class ClassIndex {
         val r = read(jar) { owner, classRefs -> defined += owner; refs.addAll(classRefs) } ?: return null
         // Configuration that names classes to load: service providers, Spring factories and auto-configuration imports.
         r.services.forEach { (iface, impls) -> refs += iface; refs.addAll(impls) }
-        val s = Summary(defined, refs, r.complete)
+        val s = Summary(defined, refs, r.complete, r.services.filterValues { it.isNotEmpty() }.keys)
         if (summaries.size >= MAX_CACHED) summaries.clear()
         summaries[jar] = Stamped(attrs.size(), attrs.lastModifiedTime().toMillis(), s)
         return s
@@ -374,6 +389,7 @@ open class ClassIndex {
         val classes = HashMap<String, String>()
         val packages = HashMap<String, String>()
         var complete = true
+        var files = 0
         val src = moduleDir.resolve("src")
         if (!src.isDirectory(LinkOption.NOFOLLOW_LINKS)) return Code(classes, packages, true)
         try {
@@ -403,6 +419,7 @@ open class ClassIndex {
                         map[key] = "$rel:$line"
                     }
                     if (code) {
+                        files++
                         for (m in IMPORT.findAll(text)) {
                             val segments = m.groupValues[1].split('.')
                             val cls = segments.indexOfFirst { it.firstOrNull()?.isUpperCase() == true }
@@ -420,13 +437,14 @@ open class ClassIndex {
         } catch (_: Exception) {
             complete = false
         }
-        return Code(classes, packages, complete)
+        return Code(classes, packages, complete, files)
     }
 
     /** Class references in the module's compiled classes (`target/classes`, `target/test-classes`), when they exist. */
     fun compiled(moduleDir: Path): Code {
         val classes = HashMap<String, String>()
         var complete = true
+        var files = 0
         for (dir in listOf("target/classes", "target/test-classes").map { moduleDir.resolve(it) }.filter { it.isDirectory(LinkOption.NOFOLLOW_LINKS) }) {
             try {
                 Files.walk(dir, MAX_DEPTH).use { stream ->
@@ -438,6 +456,7 @@ open class ClassIndex {
                             continue
                         }
                         val where = moduleDir.fileName.toString() + "/" + moduleDir.relativize(file).joinToString("/")
+                        files++
                         ClassFiles.references(Files.readAllBytes(file))?.forEach { classes.putIfAbsent(it, where) }
                     }
                 }
@@ -445,7 +464,7 @@ open class ClassIndex {
                 complete = false
             }
         }
-        return Code(classes, emptyMap(), complete)
+        return Code(classes, emptyMap(), complete, files)
     }
 
     private fun attributes(p: Path): BasicFileAttributes? = try {

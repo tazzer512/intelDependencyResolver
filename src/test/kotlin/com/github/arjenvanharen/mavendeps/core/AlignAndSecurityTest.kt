@@ -142,7 +142,8 @@ class AlignAndSecurityTest {
         }
         val targets = VulnerabilityScanner.targets(libs.values) { r.workspacePom(it.groupId, it.artifactId, it.version) != null }
         val result = VulnerabilityScanner.scan(OsvClient(transport), targets)
-        assertEquals(1, requests.size)
+        // One batch for the scan, one to check the upgrade target (0.9.1) at osv.dev.
+        assertEquals(2, requests.size)
         assertEquals(listOf("org:lib:0.8", "org:lib:0.9"), result.vulnerable.map { it.artifact.toString() }.sorted())
         val transitive = result.vulnerable.single { it.artifact.version == "0.9" }
         assertEquals(false, transitive.direct)

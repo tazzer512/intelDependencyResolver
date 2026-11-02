@@ -2,9 +2,19 @@ package com.github.arjenvanharen.mavendeps.core
 
 import java.nio.file.Path
 
-/** Bring every module that uses `groupId:artifactId` (see [usages]) to at least [target]. */
-data class AlignRequest(val groupId: String, val artifactId: String, val target: String, val usages: List<LibraryUsage>) {
+/**
+ * Bring every module that uses `groupId:artifactId` (see [usages]) to at least [target]. With [replace], only usages
+ * that resolve one of those versions move, and they move to exactly [target], even when it is older (a downgrade).
+ */
+data class AlignRequest(
+    val groupId: String,
+    val artifactId: String,
+    val target: String,
+    val usages: List<LibraryUsage>,
+    val replace: Set<String>? = null,
+) {
     val ga: String get() = "$groupId:$artifactId"
+    val downgrade: Boolean get() = replace != null && replace.any { MavenVersion(it) > MavenVersion(target) }
 }
 
 /** A library that ends up in more than one version, and the version that resolves it. */
@@ -27,7 +37,8 @@ data class VersionConflict(val library: Library, val target: String) {
  *    dependencies, so this needs no exclusions and keeps the library on the classpath.
  *
  * Versions are never lowered: declarations newer than the target are left alone, and a pin uses the newest version
- * any module below that POM already resolves.
+ * any module below that POM already resolves. The one exception is a request with [AlignRequest.replace] (a security
+ * fallback when no newer version is safe), which changes exactly the listed versions to the target.
  */
 object VersionAligner {
     /** Libraries with a version conflict that is not already resolved to the newest version, with that version. */
@@ -47,13 +58,15 @@ object VersionAligner {
         for (r in requests) {
             checkCanceled()
             val target = MavenVersion(r.target)
-            fun older(v: String?) = v != null && MavenVersion(v) < target
+            val replace = r.replace
+            fun older(v: String?) = v != null && if (replace != null) v in replace && v != r.target else MavenVersion(v) < target
 
             val updatedManagementIn = HashSet<Path>()
             items += VersionUpdatePlanner.declarationItems(ws, resolver, r.groupId, r.artifactId, r.target, ::older, propertyUpdates, updatedManagementIn)
 
-            // Modules that keep an older version after the declarations are updated, by their topmost workspace POM.
-            val pins = LinkedHashMap<Path, MutableSet<Path>>()
+            // Modules that keep an older version after the declarations are updated, by their topmost workspace POM and
+            // Maven's management key: an artifact with a classifier or type is managed separately from the plain jar.
+            val pins = LinkedHashMap<Pair<Path, String>, Pair<EffectiveDependency, MutableSet<Path>>>()
             val newestBelow = HashMap<Path, MavenVersion>()
             for (u in r.usages) {
                 if (u.node.status != NodeStatus.INCLUDED || ws.model(u.module) == null) continue
@@ -69,17 +82,20 @@ object VersionAligner {
                     val declared = d.declaredIn?.let { p -> ws.model(p)?.dependencies?.firstOrNull { it.pos == d.pos } }
                     if (!declared?.version.isNullOrEmpty()) continue
                 }
-                if (resolver.effective(u.module).managedFor(r.groupId, r.artifactId)?.declaredIn != null) continue
-                pins.getOrPut(top) { LinkedHashSet() }.add(u.module)
+                if (resolver.effective(u.module).managed[u.node.dependency.key]?.declaredIn != null) continue
+                pins.getOrPut(top to u.node.dependency.key) { u.node.dependency to LinkedHashSet() }.second.add(u.module)
             }
-            for ((pom, modules) in pins) {
-                val version = maxOf(target, newestBelow[pom] ?: target).text
+            for ((key, entry) in pins) {
+                val pom = key.first
+                val (dep, modules) = entry
+                val variant = listOfNotNull(dep.type.takeIf { it != "jar" }, dep.classifier).joinToString(":").let { if (it.isEmpty()) "" else " ($it)" }
+                val version = if (replace != null) r.target else maxOf(target, newestBelow[pom] ?: target).text
                 val names = modules.map { ws.model(it)?.effectiveGav?.artifactId ?: it.parent.fileName.toString() }.sorted()
                 items += PlanItem(
                     PlanItem.Kind.MANAGED, pom,
-                    "Pin ${r.ga} to $version in <dependencyManagement> of ${ws.model(pom)!!.effectiveGav.ga}; " +
-                        "${names.size} module${if (names.size == 1) "" else "s"} get an older version transitively (${names.joinToString(", ")})",
-                    AddDependency("Manage ${r.ga} at $version", pom, r.groupId, r.artifactId, version, managed = true), true,
+                    "Pin ${r.ga}$variant to $version in <dependencyManagement> of ${ws.model(pom)!!.effectiveGav.ga}; " +
+                        "${names.size} module${if (names.size == 1) "" else "s"} get ${if (replace != null) "a vulnerable" else "an older"} version transitively (${names.joinToString(", ")})",
+                    AddDependency("Manage ${r.ga}$variant at $version", pom, r.groupId, r.artifactId, version, managed = true, type = dep.type, classifier = dep.classifier), true,
                 )
             }
         }

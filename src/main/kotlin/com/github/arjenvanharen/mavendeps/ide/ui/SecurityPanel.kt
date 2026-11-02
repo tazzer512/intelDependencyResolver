@@ -108,6 +108,14 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         isVisible = false
     }
 
+    /** Always-visible counterpart of the toolbar's "Fix All Vulnerabilities…", with the number it would fix. */
+    private val fixAllButton = javax.swing.JButton("Fix All Issues…").apply {
+        isEnabled = false
+        toolTipText = "Upgrade every vulnerable library with a known fix (or downgrade to a safe older version when no newer " +
+            "version is safe), in every module. The change is checked for new problems and version conflicts before it is applied."
+        addActionListener { fix(visibleArtifacts()) }
+    }
+
     private var scan: Scan? = null
     private var scanning = false
     private var hideTestScopes = false
@@ -147,7 +155,11 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         content.add(north, BorderLayout.NORTH)
         content.add(splitter, BorderLayout.CENTER)
         status.border = JBUI.Borders.empty(2, 6)
-        content.add(status, BorderLayout.SOUTH)
+        val south = JPanel(BorderLayout())
+        south.add(status, BorderLayout.CENTER)
+        south.add(fixAllButton, BorderLayout.EAST)
+        south.border = JBUI.Borders.empty(2, 0, 2, 4)
+        content.add(south, BorderLayout.SOUTH)
         setContent(content)
         toolbar = createToolbar()
         details.text = hint("Click Scan to check the dependencies of all modules against osv.dev.")
@@ -173,12 +185,13 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             })
             add(object : DumbAwareAction(
                 "Fix All Vulnerabilities…",
-                "Upgrade every vulnerable library with a known fix to its fixed version; review the changes before they are applied",
+                "Upgrade every vulnerable library with a known fix to its fixed version (or, when no newer version is safe, " +
+                    "downgrade it to the newest older version without known vulnerabilities); review the changes before they are applied",
                 AllIcons.Actions.QuickfixBulb,
             ) {
                 override fun getActionUpdateThread() = ActionUpdateThread.EDT
                 override fun update(e: AnActionEvent) {
-                    e.presentation.isEnabled = visibleArtifacts().any { it.fixVersion != null }
+                    e.presentation.isEnabled = visibleArtifacts().any { it.target != null }
                 }
                 override fun actionPerformed(e: AnActionEvent) = fix(visibleArtifacts())
             })
@@ -232,6 +245,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         }
         if (scanning) return
         scanning = true
+        updateFixAllButton()
         status.text = "Scanning…"
         service.runQuery(
             "Scanning Maven dependencies for vulnerabilities",
@@ -243,7 +257,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                 }
                 val libraries = DependencyIndex.libraries(trees)
                 val targets = VulnerabilityScanner.targets(libraries) { resolver.workspacePom(it.groupId, it.artifactId, it.version) != null }
-                val result = VulnerabilityScanner.scan(service.osv, targets, p) { done, total, phase ->
+                val result = VulnerabilityScanner.scan(service.osv, targets, p, service.safeVersions) { done, total, phase ->
                     p.report(0.3 + 0.7 * done / maxOf(total, 1), "$phase ($done of $total)")
                 }
                 Scan(analysis, result, libraries.associateBy { it.ga })
@@ -251,6 +265,7 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             onProgress = { progress.job(it) },
             onFailure = {
                 scanning = false
+                updateFixAllButton()
                 status.text = if (it is QueryCancelledException) "Scan cancelled"
                 else "Scan failed: ${it.message ?: it.javaClass.simpleName} (is osv.dev reachable? Proxy settings: Settings | HTTP Proxy)"
             },
@@ -316,7 +331,19 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
             if (!hideTestScopes) a else a.usages.filter(::passes).takeIf { it.isNotEmpty() }?.let { VulnerableArtifact(a.artifact, a.vulnerabilities, it) }
         }
 
+    private fun updateFixAllButton() {
+        val all = visibleArtifacts()
+        val fixable = all.count { it.target != null }
+        fixAllButton.text = when {
+            all.isEmpty() -> "Fix All Issues…"
+            fixable == all.size -> "Fix All Issues ($fixable)…"
+            else -> "Fix All Issues ($fixable of ${all.size})…"
+        }
+        fixAllButton.isEnabled = fixable > 0 && !scanning
+    }
+
     private fun rebuild() {
+        updateFixAllButton()
         val s = scan ?: return
         root.removeAllChildren()
         val artifacts = visibleArtifacts()
@@ -390,15 +417,26 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                 status.text = "Nothing to change: the declarations already use the fixed versions"
                 return@runQuery
             }
-            val list = requests.take(12).joinToString("<br>") { "&nbsp;&nbsp;• ${esc(it.ga)} → <b>${esc(it.target)}</b>" } +
+            val list = requests.take(12).joinToString("<br>") {
+                "&nbsp;&nbsp;• ${esc(it.ga)} → <b>${esc(it.target)}</b>" + if (it.downgrade) " <i>(downgrade: no newer version is safe)</i>" else ""
+            } +
                 if (requests.size > 12) "<br>&nbsp;&nbsp;… and ${requests.size - 12} more" else ""
-            val header = "<html>Each vulnerable library is upgraded to the lowest version that fixes its known vulnerabilities:<br>$list<br><br>" +
+            val downgrades = requests.any { it.downgrade }
+            val header = "<html>Each vulnerable library is upgraded to the lowest version that fixes its known vulnerabilities" +
+                (if (downgrades) ", or, when no newer version fixes them, downgraded to the newest older version without known vulnerabilities" else "") +
+                ":<br>$list<br><br>" +
                 "Declarations (or the property they use) are updated. Modules that get the library only transitively get the fixed " +
-                "version pinned in &lt;dependencyManagement&gt; of their root POM. Versions are never lowered. Run your tests afterwards: " +
-                "a newer version can change behaviour.</html>"
-            val title = if (requests.size == 1) "Upgrade ${requests[0].ga} to ${requests[0].target}" else "Fix ${requests.size} vulnerable libraries"
+                "version pinned in &lt;dependencyManagement&gt; of their root POM. " +
+                (if (downgrades) "Only downgrades lower a version. Run your tests afterwards: an older version can lack API the code uses." +
+                    "</html>" else "Versions are never lowered. Run your tests afterwards: a newer version can change behaviour.</html>")
+            val single = requests.singleOrNull()
+            val title = when {
+                single == null -> "Fix ${requests.size} vulnerable libraries"
+                single.downgrade -> "Downgrade ${single.ga} to ${single.target}"
+                else -> "Upgrade ${single.ga} to ${single.target}"
+            }
             val applied = PlanDialog.reviewAndApply(project, title, header, items)
-            status.text = if (applied == null) "Fix cancelled" else "Applied $applied change${if (applied == 1) "" else "s"}; scan again after the analysis to confirm"
+            status.text = if (applied == null) "Fix cancelled" else "Checking $applied change${if (applied == 1) "" else "s"} for new problems, then applying; scan again after the analysis to confirm"
         }
     }
 
@@ -413,6 +451,8 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
     // ---- details pane ----
 
     private fun esc(s: String?) = StringUtil.escapeXmlEntities(s ?: "?")
+
+    private fun majorOf(v: String) = v.substringBefore('.').substringBefore('-')
 
     private fun hint(text: String) = "<html><body><span style='color:gray'>${esc(text)}</span></body></html>"
 
@@ -442,13 +482,30 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
         append(row("Used", if (a.direct) "directly declared" + if (a.usages.any { it.node.depth > 1 }) " and transitively" else "" else "only transitively"))
         append(row("Modules", a.modules.joinToString(", ") { esc(moduleName(it)) }))
         val fix = a.fixVersion
+        val older = a.saferOlderVersion
+        val olderText = older?.let {
+            "<br>No newer version fixes all of them; <b>${esc(it)}</b> is the newest older version without known vulnerabilities" +
+                if (majorOf(it) != majorOf(a.artifact.version)) " (a different major version)" else ""
+        } ?: ""
         append(row("Fix", when {
-            fix == null -> "<i>No fixed version is known yet. Check the advisories for workarounds, or exclude the library if it is not needed.</i>"
-            a.unfixed > 0 -> "Upgrade to <b>${esc(fix)}</b> (fixes ${a.vulnerabilities.size - a.unfixed} of ${a.vulnerabilities.size}; the others have no fix yet)"
+            fix == null && older != null -> "Downgrade to <b>${esc(older)}</b>: no newer version fixes these vulnerabilities, and osv.dev " +
+                "knows none for ${esc(older)}" + if (majorOf(older) != majorOf(a.artifact.version)) " (a different major version)" else ""
+            fix == null -> "<i>No fixed version is known yet, and no older version without known vulnerabilities was found. " +
+                "Check the advisories for workarounds, or exclude the library if it is not needed.</i>"
+            a.unfixed > 0 -> "Upgrade to <b>${esc(fix)}</b> (fixes ${a.vulnerabilities.size - a.unfixed} of ${a.vulnerabilities.size}; the others have no fix yet)$olderText"
             else -> "Upgrade to <b>${esc(fix)}</b>"
+        } + when {
+            fix == null -> ""
+            a.fixStillVulnerable -> "<br><i>${esc(fix)} itself still has known vulnerabilities, and no newer version is known to fix them.</i>"
+            fix != a.advisoryFixVersion -> "<br><span style='color:gray'>The advisories name ${esc(a.advisoryFixVersion)}, but that version has " +
+                "vulnerabilities of its own; ${esc(fix)} has none known at osv.dev.</span>"
+            else -> "<br><span style='color:gray'>Checked at osv.dev: ${esc(fix)} has no known vulnerabilities.</span>"
         }))
         append("</table>")
-        if (fix != null) {
+        if (fix == null && older != null) {
+            append("<p><a href='fix'><b>Downgrade to ${esc(older)} in every module that uses ${esc(a.artifact.version)}…</b></a><br><span style='color:gray'>")
+            append("An older version can lack API the code uses: run the tests afterwards. You review every change before it is applied.</span></p>")
+        } else if (fix != null) {
             append("<p><a href='fix'><b>Upgrade to ${esc(fix)} in every module…</b></a><br><span style='color:gray'>")
             append(if (a.direct) "Updates the declaration" else "Pins the version in &lt;dependencyManagement&gt; of the root POM, because the library only comes in transitively")
             append(". You review every change before it is applied.</span></p>")
@@ -532,7 +589,13 @@ internal class SecurityPanel(private val project: Project, parent: Disposable) :
                     }
                     append(if (a.direct) "  direct" else "  transitive", SimpleTextAttributes.GRAYED_ITALIC_ATTRIBUTES)
                     append("  ${a.modules.size} module${if (a.modules.size == 1) "" else "s"}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
-                    a.fixVersion?.let { append("  fix: $it", FIX_ATTRIBUTES) } ?: append("  no fix yet", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                    when {
+                        a.fixVersion != null && a.fixStillVulnerable ->
+                            append("  best fix: ${a.fixVersion} (still has known vulnerabilities)", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                        a.fixVersion != null -> append("  fix: ${a.fixVersion}", FIX_ATTRIBUTES)
+                        a.saferOlderVersion != null -> append("  no newer fix; safe older: ${a.saferOlderVersion}", FIX_ATTRIBUTES)
+                        else -> append("  no fix yet", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                    }
                 }
                 is AdvisoryItem -> {
                     val v = data.vulnerability

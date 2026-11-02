@@ -5,6 +5,26 @@ The section of the current `pluginVersion` becomes the plugin's change notes.
 
 ## [Unreleased]
 
+### Added
+- Security tab: when no newer version fixes a library's vulnerabilities, the scan finds the newest older release
+  without known vulnerabilities (checked against osv.dev; candidates from Maven Central and `~/.m2`). The library
+  shows "no newer fix; safe older: x", and the fix downgrades only the modules on a vulnerable version. The AI fix
+  report includes the downgrade.
+- Security tab: a "Fix All Issues (N)…" button at the bottom of the tab.
+- Problems tab: "Check Unused Dependencies" reports declared dependencies that nothing needs, with a fix that removes
+  them. Before a dependency is reported, the check verifies that no source, compiled class, configuration file or
+  other library references it or what it brings in, and that it registers nothing loaded at runtime.
+- Every fix (quick fixes, suggestions, conflict resolution, version updates, security fixes) is checked before it is
+  written. Changes that would add problems to the Problems tab, or make a library resolve to different versions in
+  different modules, are listed first, and you can still apply them anyway.
+
+### Fixed
+- Security fixes for an artifact with a classifier or type (e.g. Netty's `4.1.x.Final` native transports) did not
+  stick. The pin in `<dependencyManagement>` left out the classifier, so Maven did not apply it, and the next fix
+  then saw the library as already managed and changed nothing. Pins now use the full management key.
+- Upgrading to the fix version an advisory names could bring the library back with a newer advisory. Upgrade
+  targets are now checked at osv.dev and raised until they have no known vulnerabilities.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added

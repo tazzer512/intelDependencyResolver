@@ -3,6 +3,10 @@ package com.github.arjenvanharen.mavendeps.ide.ui
 import com.github.arjenvanharen.mavendeps.core.AnalysisResult
 import com.github.arjenvanharen.mavendeps.core.PomResult
 import com.github.arjenvanharen.mavendeps.core.Category
+import com.github.arjenvanharen.mavendeps.core.ClassIndex
+import com.github.arjenvanharen.mavendeps.core.DependencyIndex
+import com.github.arjenvanharen.mavendeps.core.UnusedDependencyAnalyzer
+import com.github.arjenvanharen.mavendeps.core.UnusedDependencyResult
 import com.github.arjenvanharen.mavendeps.core.Coordinates
 import com.github.arjenvanharen.mavendeps.core.Problem
 import com.github.arjenvanharen.mavendeps.core.QuickFix
@@ -90,8 +94,9 @@ class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
 }
 
 private const val SHOW_HINTS_KEY = "mavendeps.problems.showHints"
+private const val CHECK_UNUSED_KEY = "mavendeps.problems.checkUnused"
 
-private class PomNode(val result: PomResult, val base: Path?) {
+private class PomNode(val result: PomResult, val base: Path?, val extraWarnings: Int = 0) {
     override fun toString() = result.path.toString()
 }
 
@@ -111,7 +116,24 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         get() = com.intellij.ide.util.PropertiesComponent.getInstance(project).getBoolean(SHOW_HINTS_KEY, true)
         set(value) = com.intellij.ide.util.PropertiesComponent.getInstance(project).setValue(SHOW_HINTS_KEY, value, true)
 
-    private fun visible(r: PomResult) = if (showHints) r.problems else r.problems.filter { it.severity != Severity.INFO }
+    /** "Check Unused Dependencies": verify declared dependencies against the code after every analysis. */
+    private var checkUnused: Boolean
+        get() = com.intellij.ide.util.PropertiesComponent.getInstance(project).getBoolean(CHECK_UNUSED_KEY, true)
+        set(value) = com.intellij.ide.util.PropertiesComponent.getInstance(project).setValue(CHECK_UNUSED_KEY, value, true)
+
+    private val service get() = MavenAnalysisService.getInstance(project)
+    private val progress = InlineProgress(project, parent)
+    private val unusedAnalyzer by lazy { UnusedDependencyAnalyzer(service.repository, ClassIndex()) }
+    private var unused: UnusedDependencyResult? = null
+    /** Unused-dependency problems still valid for the shown analysis, per declaring POM. */
+    private var unusedShown: Map<Path, List<Problem>> = emptyMap()
+    private var checkingUnused = false
+    private var unusedPending = false
+
+    private fun visible(r: PomResult): List<Problem> {
+        val all = r.problems + unusedShown[r.path].orEmpty()
+        return if (showHints) all else all.filter { it.severity != Severity.INFO }
+    }
     private var everShown = false
 
     init {
@@ -139,7 +161,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         })
 
         val content = JPanel(BorderLayout())
-        content.add(InlineProgress(project, parent), BorderLayout.NORTH)
+        content.add(progress, BorderLayout.NORTH)
         content.add(ScrollPaneFactory.createScrollPane(tree, true), BorderLayout.CENTER)
         status.border = JBUI.Borders.empty(2, 6)
         content.add(status, BorderLayout.SOUTH)
@@ -148,10 +170,17 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
 
         project.messageBus.connect(parent).subscribe(
             MavenAnalysisListener.TOPIC,
-            MavenAnalysisListener { result -> ApplicationManager.getApplication().invokeLater({ show(result) }, project.disposed) },
+            MavenAnalysisListener { result ->
+                ApplicationManager.getApplication().invokeLater({
+                    show(result)
+                    checkUnusedDependencies()
+                }, project.disposed)
+            },
         )
-        val service = MavenAnalysisService.getInstance(project)
-        service.lastResult?.let { show(it) } ?: run {
+        service.lastResult?.let {
+            show(it)
+            checkUnusedDependencies()
+        } ?: run {
             status.text = "Analyzing…"
             service.requestRefresh(RefreshMode.RESCAN)
         }
@@ -195,6 +224,22 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
                     MavenAnalysisService.getInstance(project).lastResult?.let { show(it) }
                 }
             })
+            add(object : ToggleAction(
+                "Check Unused Dependencies",
+                "After each analysis, check every declared dependency against the code (sources, compiled classes, configuration) " +
+                    "and the other dependencies, and report those that nothing needs",
+                AllIcons.Actions.Unselectall,
+            ), DumbAware {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = checkUnused
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    checkUnused = state
+                    if (state) checkUnusedDependencies() else {
+                        unused = null
+                        service.lastResult?.let { show(it) }
+                    }
+                }
+            })
             add(com.intellij.ide.CommonActionsManager.getInstance().createExpandAllAction(expander, tree))
             add(com.intellij.ide.CommonActionsManager.getInstance().createCollapseAllAction(expander, tree))
         }
@@ -203,7 +248,41 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         return toolbar.component
     }
 
+    /** Runs the unused-dependency check in the background; a request while it runs is merged into one more run. */
+    private fun checkUnusedDependencies() {
+        if (!checkUnused || service.lastResult == null) return
+        if (checkingUnused) {
+            unusedPending = true
+            return
+        }
+        checkingUnused = true
+        service.lastResult?.let { show(it) }
+        fun finished() {
+            checkingUnused = false
+            service.lastResult?.let { show(it) }
+            if (unusedPending) {
+                unusedPending = false
+                checkUnusedDependencies()
+            }
+        }
+        service.runQuery(
+            "Checking for unused dependencies",
+            { p ->
+                val resolver = service.resolver()
+                val modules = resolver.ws.entries.keys
+                val trees = DependencyIndex.resolveAll(resolver, modules, p) { done, total, _ -> p.report(0.4 * done / total, "Resolving dependency trees ($done of $total)") }
+                unusedAnalyzer.analyze(resolver, trees, p) { done, total -> p.report(0.4 + 0.6 * done / maxOf(total, 1), "Checking module code ($done of $total)") }
+            },
+            onProgress = { progress.job(it) },
+            onFailure = { finished() },
+        ) {
+            if (checkUnused) unused = it
+            finished()
+        }
+    }
+
     private fun show(result: AnalysisResult) {
+        unusedShown = if (checkUnused) unused?.current(result).orEmpty() else emptyMap()
         val state = TreeState.createOn(tree, root)
         root.removeAllChildren()
         val base = project.basePath?.let { Path.of(it) }
@@ -222,7 +301,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
             val r = result.poms[path] ?: return null
             if (!visited.add(path)) return null
             if (onlyProblems && !hasProblems(path, HashSet())) return null
-            val node = DefaultMutableTreeNode(PomNode(r, base))
+            val node = DefaultMutableTreeNode(PomNode(r, base, unusedShown[path].orEmpty().size))
             visible(r).forEach { node.add(DefaultMutableTreeNode(ProblemNode(path, it))) }
             r.modules.forEach { m -> build(m)?.let { node.add(it) } }
             return node
@@ -236,8 +315,13 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
         val errors = result.count(Severity.ERROR)
         val warnings = result.count(Severity.WARNING)
         val suggestions = result.poms.values.sumOf { r -> r.problems.count { it.category == Category.SUGGESTIONS } }
+        val unusedCount = unusedShown.values.sumOf { it.size }
         status.text = "${s.total} POMs · ${s.parsed} parsed, ${s.reused} cached · ${s.revalidated} revalidated · ${s.durationMs} ms" +
-            " — $errors errors, $warnings warnings, $suggestions suggestions"
+            " — $errors errors, $warnings warnings, $suggestions suggestions" + when {
+                !checkUnused -> ""
+                checkingUnused -> " · checking unused dependencies…"
+                else -> " · $unusedCount unused dependenc${if (unusedCount == 1) "y" else "ies"}"
+            }
         if (result.poms.isEmpty()) status.text = "No pom.xml found in the project root or content roots"
     }
 
@@ -295,7 +379,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
                     val shown = data.base?.let { b -> if (r.path.startsWith(b)) b.relativize(r.path).toString() else null } ?: r.path.toString()
                     append("  $shown", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
                     val errors = r.problems.count { it.severity == Severity.ERROR }
-                    val warnings = r.problems.count { it.severity == Severity.WARNING }
+                    val warnings = r.problems.count { it.severity == Severity.WARNING } + data.extraWarnings
                     if (errors > 0) append("  $errors error${if (errors > 1) "s" else ""}", SimpleTextAttributes.ERROR_ATTRIBUTES)
                     if (warnings > 0) append("  $warnings warning${if (warnings > 1) "s" else ""}", SimpleTextAttributes.GRAYED_BOLD_ATTRIBUTES)
                 }

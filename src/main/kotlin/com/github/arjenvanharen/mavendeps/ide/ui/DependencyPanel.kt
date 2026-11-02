@@ -284,7 +284,7 @@ internal class DependencyPanel(private val project: Project) : SimpleToolWindowP
                 project, "Update ${query.groupId}:${query.artifactId} to $to",
                 "Review the changes; transitive occurrences with another version are excluded at the dependency that brings them in.", items,
             )
-            status.text = if (applied == null) "Update cancelled" else "Applied $applied change${if (applied == 1) "" else "s"}; search again to see the result"
+            status.text = if (applied == null) "Update cancelled" else "Checking $applied change${if (applied == 1) "" else "s"} for new problems, then applying; search again to see the result"
         }
     }
 

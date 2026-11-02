@@ -36,7 +36,8 @@ object FixReport {
         }
         appendLine("Task: upgrade the Maven dependencies below in this multi-module project so the listed vulnerabilities are fixed.")
         appendLine("Rules:")
-        appendLine("- Upgrade to at least the given fix version; never lower a version.")
+        appendLine("- Upgrade to at least the given fix version; never lower a version, except where a downgrade is given below")
+        appendLine("  (no newer version is safe; the downgrade version has no known advisories).")
         appendLine("- If the declared version is a \${property}, change the property where it is defined.")
         appendLine("- A library that only comes in transitively: pin the fix version in <dependencyManagement> of the root POM,")
         appendLine("  or upgrade the direct dependency that brings it in to a version that uses a fixed version.")
@@ -47,7 +48,11 @@ object FixReport {
             val fix = vulns.mapNotNull { it.fixFor(a.artifact.ga, a.artifact.version) }.map(::MavenVersion).maxOrNull()?.text
             appendLine()
             append("## ${i + 1}. ${a.artifact}")
-            appendLine(if (fix != null) " → upgrade to $fix" else " → no fixed version known")
+            appendLine(when {
+                fix != null -> " → upgrade to $fix"
+                a.saferOlderVersion != null -> " → no newer fix; downgrade to ${a.saferOlderVersion} (no known advisories)"
+                else -> " → no fixed version known"
+            })
             for (v in vulns) {
                 val ids = (listOfNotNull(v.cve) + v.id).distinct().joinToString(" / ")
                 val fixed = v.fixFor(a.artifact.ga, a.artifact.version)?.let { "fixed in $it" } ?: "no fix yet"
@@ -61,7 +66,9 @@ object FixReport {
                 appendLine("- Code using the vulnerable classes: " + refs.take(MAX_REFERENCES).joinToString("; ") +
                     if (refs.size > MAX_REFERENCES) "; … ${refs.size - MAX_REFERENCES} more" else "")
             }
-            if (fix == null) appendLine("- No fix: apply the workaround from ${vulns.first().url}, or remove the dependency if it is not needed.")
+            if (fix == null && a.saferOlderVersion != null) {
+                appendLine("- Downgrade: check the code against ${a.saferOlderVersion}'s API (it may lack features the current version has).")
+            } else if (fix == null) appendLine("- No fix: apply the workaround from ${vulns.first().url}, or remove the dependency if it is not needed.")
         }
         appendSkipped(skipped)
     }

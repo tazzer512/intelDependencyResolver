@@ -23,7 +23,11 @@ data class DefineProperty(override val title: String, val pom: Path?, val name: 
 
 data class AddExclusion(override val title: String, val target: ElementRef, val groupId: String, val artifactId: String) : QuickFix
 
-/** Adds a dependency to [pom], or with [managed] to its `<dependencyManagement>` (setting the version when already managed there). */
+/**
+ * Adds a dependency to [pom], or with [managed] to its `<dependencyManagement>` (setting the version when already
+ * managed there). Entries match on Maven's key, so [type] (null = `jar`) and [classifier] count: a pin without the
+ * classifier would not manage `netty-transport-native-epoll:linux-x86_64`.
+ */
 data class AddDependency(
     override val title: String,
     val pom: Path?,
@@ -31,6 +35,8 @@ data class AddDependency(
     val artifactId: String,
     val version: String,
     val managed: Boolean = false,
+    val type: String? = null,
+    val classifier: String? = null,
 ) : QuickFix
 
 data class CompositeFix(override val title: String, val parts: List<QuickFix>) : QuickFix
@@ -100,9 +106,12 @@ object FixApplier {
                     }
                 }
                 is AddDependency -> {
+                    val type = leaf.type?.takeIf { it != "jar" }
                     val snippet = "<dependency><groupId>${esc(leaf.groupId)}</groupId><artifactId>${esc(leaf.artifactId)}</artifactId>" +
-                        "<version>${esc(leaf.version)}</version></dependency>"
-                    fun same(n: XNode) = n.childText("groupId") == leaf.groupId && n.childText("artifactId") == leaf.artifactId
+                        "<version>${esc(leaf.version)}</version>" + (type?.let { "<type>${esc(it)}</type>" } ?: "") +
+                        (leaf.classifier?.let { "<classifier>${esc(it)}</classifier>" } ?: "") + "</dependency>"
+                    fun same(n: XNode) = n.childText("groupId") == leaf.groupId && n.childText("artifactId") == leaf.artifactId &&
+                        (n.childText("type")?.takeIf { it != "jar" }) == type && n.childText("classifier") == leaf.classifier
                     if (leaf.managed) {
                         val dm = d.root.child("dependencyManagement")
                         val existing = dm?.child("dependencies")?.children("dependency")?.firstOrNull(::same)
@@ -129,6 +138,13 @@ object FixApplier {
     }
 
     /** Back to front, so earlier offsets stay valid; insertions at the same offset keep their order. */
+    /** [text] with [edits] applied. */
+    fun applyTo(text: String, edits: List<TextEdit>): String {
+        val sb = StringBuilder(text)
+        inApplicationOrder(edits).forEach { sb.replace(it.start, it.end, it.replacement) }
+        return sb.toString()
+    }
+
     fun inApplicationOrder(edits: List<TextEdit>): List<TextEdit> =
         edits.withIndex().sortedWith(compareByDescending<IndexedValue<TextEdit>> { it.value.start }.thenByDescending { it.index }).map { it.value }
 

@@ -8,7 +8,11 @@
             <li>Parses the whole module tree once and caches the result on disk.</li>
             <li>Only re-parses changed POMs and re-validates the modules affected by them.</li>
             <li>Validation: XML syntax, POM structure, multi-module consistency, property references, build plugin
-                versions, dependencies on workspace modules with a stale version, and snapshots in releases.</li>
+                versions, dependencies on workspace modules with a stale version, snapshots in releases, and declared
+                dependencies that no code, configuration or other library needs (verified against sources, compiled
+                classes and jars).</li>
+            <li>Every fix is checked before it is written: changes that would add problems or version conflicts are
+                listed first.</li>
             <li>Quick fixes for most problems, and suggestions to extract repeated versions into a property.</li>
             <li>Find a dependency in all POMs and in the resolved transitive dependency trees (local repository).</li>
             <li>Update a dependency version in every POM, excluding transitive copies with another version.</li>
@@ -22,7 +26,8 @@
             <li>Version conflicts explained per library, and resolved in one step: every conflicting library is aligned to the
                 newest version found (declarations updated, transitive-only modules pinned in dependencyManagement).</li>
             <li>Security: scan all direct and transitive dependencies for known vulnerabilities (CVEs, GitHub advisories) via
-                osv.dev, and upgrade vulnerable libraries to their fixed versions. Only coordinates are sent, and only on request.
+                osv.dev, and fix them all with one button: upgrades go to a version that is itself checked at osv.dev; when no newer version fixes them, fall back to the
+                newest older version without known vulnerabilities. Only coordinates are sent, and only on request.
                 Optionally checks locally whether the code reaches the vulnerable classes, and flags advisories that do
                 not impact the code. Copies a short fix report to hand to an AI assistant.</li>
         </ul>

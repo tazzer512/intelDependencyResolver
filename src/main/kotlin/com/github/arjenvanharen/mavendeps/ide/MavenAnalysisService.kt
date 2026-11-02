@@ -7,6 +7,8 @@ import com.github.arjenvanharen.mavendeps.core.DependencyResolver
 import com.github.arjenvanharen.mavendeps.core.LocalRepository
 import com.github.arjenvanharen.mavendeps.core.OsvClient
 import com.github.arjenvanharen.mavendeps.core.OsvTransport
+import com.github.arjenvanharen.mavendeps.core.MavenCentral
+import com.github.arjenvanharen.mavendeps.core.SafeVersionFinder
 import com.github.arjenvanharen.mavendeps.core.RefreshMode
 import com.github.arjenvanharen.mavendeps.core.RefreshProgress
 import com.github.arjenvanharen.mavendeps.core.VersionHint
@@ -132,14 +134,21 @@ class MavenAnalysisService(private val project: Project, private val scope: Coro
         }
     }
 
-    /** Vulnerability lookups at osv.dev through the IDE's HTTP settings (proxy, certificates); advisories are cached for the session. */
-    val osv: OsvClient by lazy {
-        OsvClient(object : OsvTransport {
-            override fun post(url: String, json: String): String =
-                HttpRequests.post(url, "application/json").productNameAsUserAgent().connect { it.write(json); it.readString() }
+    /** HTTP through the IDE's settings (proxy, certificates). */
+    private val http = object : OsvTransport {
+        override fun post(url: String, json: String): String =
+            HttpRequests.post(url, "application/json").productNameAsUserAgent().connect { it.write(json); it.readString() }
 
-            override fun get(url: String): String = HttpRequests.request(url).productNameAsUserAgent().readString()
-        })
+        override fun get(url: String): String = HttpRequests.request(url).productNameAsUserAgent().readString()
+    }
+
+    /** Vulnerability lookups at osv.dev; advisories are cached for the session. */
+    val osv: OsvClient by lazy { OsvClient(http) }
+
+    /** Older versions without known advisories, from Maven Central's and the local repository's version lists. */
+    val safeVersions: SafeVersionFinder by lazy {
+        val central = MavenCentral(http)
+        SafeVersionFinder(osv) { g, a -> central.versions(g, a) + repository.versions(g, a) }
     }
 
     /** The local Maven repository used for transitive dependencies. */

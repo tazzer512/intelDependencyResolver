@@ -21,6 +21,19 @@ Open the **Maven Analyzer** tool window to get started.
 - Suggests extracting a version that repeats across declarations into a property. **Apply All Suggestions** does them
   all at once.
 - **Show Hints** hides or shows suggestions and other hints, so errors and warnings stand out.
+- **Check Unused Dependencies** (toolbar toggle, on by default) reports declared dependencies that nothing needs, like
+  `mvn dependency:analyze`, with a fix that removes them. It runs in the background after each analysis, and each
+  candidate is verified before it is reported. It must not be referenced by the module's sources, compiled classes
+  (`target/classes`, `target/test-classes`) or configuration files (Spring XML, `logback.xml`, …). This includes the
+  libraries it brings in. No other library or workspace module on the classpath may reference it (for example as an
+  optional dependency or a supertype). It also must not register anything loaded at runtime (`META-INF/services`,
+  Spring auto-configuration), which covers JDBC drivers, logging bindings, annotation processors and starters.
+  A declaration in a parent is reported only when no child needs it. When a jar is missing or the code can't be
+  read completely, nothing is reported. `runtime` scope is not checked.
+- **Every fix is checked before it is written**: quick fixes, Apply All Suggestions, conflict resolution, version
+  updates and security fixes. The changed POMs are validated together with the rest of the workspace, and the
+  dependency trees are resolved again. If the change would add a problem to this tab or make a library resolve to
+  different versions in different modules, you see the list and decide whether to apply it anyway.
 - Analysis is incremental: only changed POMs are re-parsed, and only the POMs they affect are re-validated. The
   result is cached on disk, so reopening a project is quick.
 - The tab title shows the number of errors and warnings, for example `Problems (3)`.
@@ -60,8 +73,18 @@ Open the **Maven Analyzer** tool window to get started.
   [osv.dev](https://osv.dev), which covers CVEs and GitHub Security Advisories.
 - Results are sorted by severity (with CVSS v3 scores), and show the CVE id, the affected modules, and the path each
   vulnerable library comes in through.
-- **Fix All Vulnerabilities…** upgrades every vulnerable library to the lowest version that fixes its known
-  vulnerabilities. It works like conflict resolution, so transitive-only libraries are fixed too.
+- **Fix All Issues (N)…** (button at the bottom right, and in the toolbar) upgrades every vulnerable library to the
+  lowest version that fixes its known vulnerabilities. It works like conflict resolution, so transitive-only libraries are fixed too.
+- Every upgrade target is checked at osv.dev. When the version an advisory names as fixed has vulnerabilities of its
+  own, the target moves up until it has none. A library would otherwise come back after the fix. If no version is
+  free of known vulnerabilities, the library shows "best fix: x (still has known vulnerabilities)".
+- Pins keep the artifact's classifier and type (e.g. `netty-transport-native-epoll:linux-x86_64`). Maven manages those
+  separately from the plain jar.
+- **Safe older version** fallback: when no newer version fixes all of a library's advisories, the scan looks for the
+  newest older release that osv.dev reports no vulnerabilities for. Candidate versions come from Maven Central's
+  `maven-metadata.xml` (only `groupId:artifactId` is sent) and `~/.m2`. The tree shows "no newer fix; safe older: x",
+  and the fix (or Fix All, for libraries without any upgrade) downgrades only the modules on a vulnerable version.
+  The review dialog marks downgrades; an older version can lack API your code uses, so run the tests afterwards.
 - **Code is affected by CVE** (checkbox): checks whether your code can reach the vulnerable code. The classes an
   advisory names, plus every class of the library that uses them, count as vulnerable. If the advisory names no class,
   the whole library counts. A module is affected when its sources, compiled classes, configuration files, workspace
@@ -124,6 +147,8 @@ To release a new version:
 - Artifacts whose POM is not in your local repository are reported as missing, and their dependencies are unknown.
   Run a Maven build once to fill `~/.m2`.
 - The analysis reads saved files, so editor highlights and hints appear once a POM is saved.
+- The unused-dependency check is static. A class loaded only by reflection from a computed name is not seen, and
+  compiled classes from an old build count as code.
 
 ## License
 

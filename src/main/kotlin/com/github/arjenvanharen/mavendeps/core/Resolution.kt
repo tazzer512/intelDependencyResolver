@@ -25,8 +25,6 @@ class LocalRepository(val root: Path) {
         return segments.fold(root) { dir, s -> dir.resolve(s) }.normalize().takeIf { it.startsWith(root.normalize()) }
     }
 
-    private fun isSafeSegment(s: String) =
-        s.isNotEmpty() && s != "." && s != ".." && s.none { it == '/' || it == '\\' || it == ':' || it.isISOControl() } && "\${" !in s
 
     /** Where the POM of an artifact lives, or null when the coordinates cannot name a file in the repository. */
     fun pomPath(groupId: String, artifactId: String, version: String): Path? {
@@ -87,6 +85,10 @@ class LocalRepository(val root: Path) {
 
     companion object {
         private const val MAX_CACHED = 20_000
+
+        /** A coordinate usable as one path segment: no separators, `.`/`..`, control characters or expressions. */
+        internal fun isSafeSegment(s: String) =
+            s.isNotEmpty() && s != "." && s != ".." && s.none { it == '/' || it == '\\' || it == ':' || it.isISOControl() } && "\${" !in s
 
         /** `-Dmaven.repo.local`, else `<localRepository>` from `~/.m2/settings.xml`, else `~/.m2/repository`. */
         fun default(): LocalRepository {
