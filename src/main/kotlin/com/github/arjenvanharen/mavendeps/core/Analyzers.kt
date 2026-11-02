@@ -17,8 +17,8 @@ class AnalysisSuite(val name: String, val pomAnalyzers: List<PomAnalyzer>, val g
     companion object {
         val VALIDATION = AnalysisSuite(
             "Validation",
-            listOf(ModuleValidator, ParentValidator, DependencyVersionValidator, PropertyValidator),
-            listOf(DuplicateCoordinatesValidator, RepeatedVersionAnalyzer),
+            listOf(ModuleValidator, ParentValidator, DependencyVersionValidator, PropertyValidator, PluginValidator, RedundantVersionAnalyzer, SnapshotDependencyValidator),
+            listOf(DuplicateCoordinatesValidator, RepeatedVersionAnalyzer, ModuleDependencyVersionValidator),
         )
     }
 }
@@ -218,9 +218,12 @@ object RepeatedVersionAnalyzer : GlobalAnalyzer {
         val groups = LinkedHashMap<Pair<String, String>, MutableList<Occurrence>>()
         for ((path, entry) in ws.entries) {
             if (!entry.model.wellFormed) continue
+            // A version the dependencyManagement already supplies is better removed (RedundantVersionAnalyzer) than extracted.
+            val managed by lazy(LazyThreadSafetyMode.NONE) { ManagedVersions.of(ws, path).orEmpty() }
             for (dep in entry.model.dependencies) {
                 val v = dep.version
                 if (v.isNullOrEmpty() || v.contains("\${") || v == "RELEASE" || v == "LATEST" || dep.scope == "import") continue
+                if (dep.section == DependencySection.DEPENDENCIES && managed[dep.managementKey { ws.interpolate(path, it) }]?.first == v) continue
                 val g = ws.interpolate(path, dep.groupId) ?: continue
                 val a = ws.interpolate(path, dep.artifactId) ?: continue
                 if (g.contains("\${") || a.contains("\${")) continue

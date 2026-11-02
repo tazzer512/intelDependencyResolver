@@ -113,8 +113,15 @@ object PomParser {
         val dependencies = ArrayList<Dependency>()
         val profileProperties = LinkedHashSet<String>()
         val profiles = ArrayList<Profile>()
+        val plugins = ArrayList<Plugin>()
 
         fun collect(owner: XNode, profile: String?) {
+            for (build in owner.children("build")) {
+                build.children("plugins").forEach { ps -> ps.children("plugin").forEach { plugins += plugin(it, false, profile) } }
+                build.children("pluginManagement").forEach { pm ->
+                    pm.children("plugins").forEach { ps -> ps.children("plugin").forEach { plugins += plugin(it, true, profile) } }
+                }
+            }
             for (container in owner.children("modules")) container.children("module").forEach { modules += ModuleRef(it.text, it.pos, profile) }
             for (container in owner.children("subprojects")) container.children("subproject").forEach { modules += ModuleRef(it.text, it.pos, profile) }
             owner.children("dependencies").forEach { deps ->
@@ -165,8 +172,15 @@ object PomParser {
             dependencies = dependencies,
             propertyRefs = collectPropertyRefs(root),
             profiles = profiles,
+            plugins = plugins,
+            relocation = root.child("distributionManagement")?.child("relocation")?.let {
+                Gav(it.childText("groupId"), it.childText("artifactId"), it.childText("version"))
+            },
         )
     }
+
+    private fun plugin(node: XNode, managed: Boolean, profile: String?) =
+        Plugin(node.childText("groupId"), node.childText("artifactId"), node.childText("version"), managed, profile, node.pos)
 
     private fun dependency(node: XNode, section: DependencySection, profile: String?) = Dependency(
         groupId = node.childText("groupId"),
@@ -182,6 +196,7 @@ object PomParser {
         optional = node.childText("optional") == "true",
         exclusions = node.child("exclusions")?.children("exclusion").orEmpty()
             .map { "${it.childText("groupId") ?: "*"}:${it.childText("artifactId") ?: "*"}" },
+        versionPos = node.child("version")?.pos ?: Pos.NONE,
     )
 
     /** Elements whose contents are interpreted by plugins rather than by the model builder. */

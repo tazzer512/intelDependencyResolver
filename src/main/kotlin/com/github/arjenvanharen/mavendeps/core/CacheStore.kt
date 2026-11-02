@@ -17,7 +17,7 @@ import java.util.zip.GZIPOutputStream
  */
 object CacheStore {
     private const val MAGIC = 0x4D444143 // "MDAC"
-    private const val VERSION = 4
+    private const val VERSION = 5
     private const val MAX_ITEMS = 1_000_000
 
     fun write(file: Path, entries: Collection<PomEntry>) {
@@ -101,6 +101,7 @@ object CacheStore {
             writePos(it.pos)
             writeBoolean(it.optional)
             writeList(it.exclusions) { e -> writeStr(e) }
+            writePos(it.versionPos)
         }
         writeList(m.propertyRefs) {
             writeStr(it.name)
@@ -117,6 +118,16 @@ object CacheStore {
                 writeStr(it.value)
             }
         }
+        writeList(m.plugins) {
+            writeNullable(it.groupId)
+            writeNullable(it.artifactId)
+            writeNullable(it.version)
+            writeBoolean(it.managed)
+            writeNullable(it.profile)
+            writePos(it.pos)
+        }
+        writeBoolean(m.relocation != null)
+        m.relocation?.let { writeGav(it) }
     }
 
     private fun DataInputStream.readModel(): PomModel {
@@ -143,6 +154,7 @@ object CacheStore {
                 pos = readPos(),
                 optional = readBoolean(),
                 exclusions = readList { readStr() },
+                versionPos = readPos(),
             )
         }
         val refs = readList { PropertyRef(readStr(), readPos(), readBoolean()) }
@@ -153,7 +165,9 @@ object CacheStore {
                 readList { readStr() to readStr() }.toMap(LinkedHashMap()),
             )
         }
-        return PomModel(wellFormed, modelVersion, gav, gavPos, packaging, parent, modules, properties, profileProperties, dependencies, refs, profiles)
+        val plugins = readList { Plugin(readNullable(), readNullable(), readNullable(), readBoolean(), readNullable(), readPos()) }
+        val relocation = if (readBoolean()) readGav() else null
+        return PomModel(wellFormed, modelVersion, gav, gavPos, packaging, parent, modules, properties, profileProperties, dependencies, refs, profiles, plugins, relocation)
     }
 
     private fun DataOutputStream.writeProblem(p: Problem) {

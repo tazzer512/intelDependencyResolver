@@ -9,6 +9,7 @@ import com.github.arjenvanharen.mavendeps.core.DependencyIndex
 import com.github.arjenvanharen.mavendeps.core.DependencyNode
 import com.github.arjenvanharen.mavendeps.core.DependencyResolver
 import com.github.arjenvanharen.mavendeps.core.DependencyTree
+import com.github.arjenvanharen.mavendeps.core.DependencyTreeText
 import com.github.arjenvanharen.mavendeps.core.Library
 import com.github.arjenvanharen.mavendeps.core.LibraryUsage
 import com.github.arjenvanharen.mavendeps.core.NodeStatus
@@ -276,6 +277,9 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             selectedConflict()?.let { resolveConflicts(listOf(it)) }
         },
         action("Copy as <dependency>", "Copy a POM snippet for this dependency", AllIcons.Actions.Copy) { copySnippet() },
+        action("Copy Dependency Tree", "Copy this module's resolved tree in the format of mvn dependency:tree", AllIcons.Actions.Copy, { (selected() as? ModuleItem)?.tree != null }) {
+            copyTree()
+        },
     )
 
     private fun action(text: String, description: String, icon: javax.swing.Icon, enabled: () -> Boolean = { selected() != null }, run: () -> Unit): AnAction =
@@ -499,6 +503,16 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
         status.text = "Copied ${c.groupId}:${c.artifactId} as <dependency>"
     }
 
+    /** The selected module's tree as `mvn dependency:tree` text; omitted nodes too when they are shown. */
+    private fun copyTree() {
+        val item = selected() as? ModuleItem ?: return
+        val tree = item.tree ?: return
+        val model = item.result.model
+        val text = DependencyTreeText.render(model.effectiveGav, model.effectivePackaging, tree, verbose = showOmitted)
+        CopyPasteManager.getInstance().setContents(StringSelection(text))
+        status.text = "Copied the dependency tree of ${model.effectiveGav.ga}"
+    }
+
     private fun onLink(action: String) {
         when (action) {
             "pom" -> openPom()
@@ -645,6 +659,8 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
             append(row("Scope", esc(n.scope) + if (n.dependency.optional) ", optional" else ""))
             append(row("Status", status))
             n.managedFrom?.let { append(row("Managed", "version forced by dependencyManagement (requested ${esc(it)})")) }
+            n.requestedRange?.let { append(row("Range", "requested ${esc(it)}; " + if (n.version != it) "highest match in the local repository" else "no version in the local repository matches")) }
+            n.relocatedFrom?.let { append(row("Relocated", "from ${esc(it)} (its POM points here)")) }
             append(row("Path", chain))
             append(row("Declared in", declaredIn))
             append(row("POM", pom?.let { esc(rel(it)) } ?: "<i>not available</i>"))
@@ -784,6 +800,8 @@ internal class ExplorerPanel(private val project: Project, parent: Disposable, p
                 NodeStatus.OMITTED_CONFLICT -> append("  ✕ ${n.winnerVersion} wins", SimpleTextAttributes.ERROR_ATTRIBUTES)
             }
             n.managedFrom?.let { append("  managed (was $it)", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+            n.requestedRange?.let { append("  from $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+            n.relocatedFrom?.let { append("  relocated from $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
             if (!n.pomFound) append("  POM missing", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             if (module != null) {
                 if (n.depth == 1) append("  declared", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)

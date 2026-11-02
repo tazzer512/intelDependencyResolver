@@ -89,6 +89,8 @@ class AnalyzerToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 }
 
+private const val SHOW_HINTS_KEY = "mavendeps.problems.showHints"
+
 private class PomNode(val result: PomResult, val base: Path?) {
     override fun toString() = result.path.toString()
 }
@@ -103,6 +105,13 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
     private val tree = Tree(model)
     private val status = JBLabel()
     private var onlyProblems = false
+
+    /** Hints are INFO problems (suggestions, redundant versions); persisted per project. */
+    private var showHints: Boolean
+        get() = com.intellij.ide.util.PropertiesComponent.getInstance(project).getBoolean(SHOW_HINTS_KEY, true)
+        set(value) = com.intellij.ide.util.PropertiesComponent.getInstance(project).setValue(SHOW_HINTS_KEY, value, true)
+
+    private fun visible(r: PomResult) = if (showHints) r.problems else r.problems.filter { it.severity != Severity.INFO }
     private var everShown = false
 
     init {
@@ -178,6 +187,14 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
                     MavenAnalysisService.getInstance(project).lastResult?.let { show(it) }
                 }
             })
+            add(object : ToggleAction("Show Hints", "Show suggestions and other hints, not only errors and warnings", AllIcons.General.Information), DumbAware {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = showHints
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    showHints = state
+                    MavenAnalysisService.getInstance(project).lastResult?.let { show(it) }
+                }
+            })
             add(com.intellij.ide.CommonActionsManager.getInstance().createExpandAllAction(expander, tree))
             add(com.intellij.ide.CommonActionsManager.getInstance().createCollapseAllAction(expander, tree))
         }
@@ -198,7 +215,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
             withProblems[path]?.let { return it }
             if (!seen.add(path)) return false
             val r = result.poms[path] ?: return false
-            return (r.problems.isNotEmpty() || r.modules.any { hasProblems(it, seen) }).also { withProblems[path] = it }
+            return (visible(r).isNotEmpty() || r.modules.any { hasProblems(it, seen) }).also { withProblems[path] = it }
         }
 
         fun build(path: Path): DefaultMutableTreeNode? {
@@ -206,7 +223,7 @@ private class AnalyzerPanel(private val project: Project, parent: Disposable) : 
             if (!visited.add(path)) return null
             if (onlyProblems && !hasProblems(path, HashSet())) return null
             val node = DefaultMutableTreeNode(PomNode(r, base))
-            r.problems.forEach { node.add(DefaultMutableTreeNode(ProblemNode(path, it))) }
+            visible(r).forEach { node.add(DefaultMutableTreeNode(ProblemNode(path, it))) }
             r.modules.forEach { m -> build(m)?.let { node.add(it) } }
             return node
         }

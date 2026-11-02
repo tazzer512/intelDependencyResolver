@@ -75,6 +75,7 @@ object FixApplier {
         "parent" to listOf("groupId", "artifactId", "version", "relativePath"),
         "dependency" to listOf("groupId", "artifactId", "version", "type", "classifier", "scope", "systemPath", "optional", "exclusions"),
         "exclusion" to listOf("groupId", "artifactId"),
+        "plugin" to listOf("groupId", "artifactId", "version", "extensions", "executions", "dependencies", "goals", "inherited", "configuration"),
     )
 
     /** All files [fix] touches; [owner] is the POM the fix was reported on. */

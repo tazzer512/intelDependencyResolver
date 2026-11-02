@@ -12,8 +12,15 @@ Open the **Maven Analyzer** tool window to get started.
 - Validates XML syntax, POM structure, multi-module consistency (modules, parents, relativePath, packaging,
   duplicate coordinates) and property references.
 - Offers quick fixes for most problems: click the lightbulb, press Alt+Enter, or right-click a problem.
+- Checks build plugins: a plugin without a version that no `<pluginManagement>` manages (the build then depends on the
+  Maven version), and a plugin declared twice.
+- Reports a dependency on a workspace module with a version that module does not have: Maven would take the old
+  artifact from the repository instead of the module. The fix uses `${project.version}` or the module's version.
+- Reports a release that depends on a `-SNAPSHOT` dependency, plugin or parent.
+- Hints at a `<version>` that equals what `<dependencyManagement>` already supplies, with a fix that removes it.
 - Suggests extracting a version that repeats across declarations into a property. **Apply All Suggestions** does them
   all at once.
+- **Show Hints** hides or shows suggestions and other hints, so errors and warnings stand out.
 - Analysis is incremental: only changed POMs are re-parsed, and only the POMs they affect are re-validated. The
   result is cached on disk, so reopening a project is quick.
 - The tab title shows the number of errors and warnings, for example `Problems (3)`.
@@ -27,7 +34,10 @@ Open the **Maven Analyzer** tool window to get started.
 
 ### Explorer
 - **Modules** view: the module hierarchy, with each module's resolved dependency tree. Maven's "nearest wins"
-  mediation, exclusions, scopes and dependency management are applied.
+  mediation, exclusions, scopes and dependency management are applied. A version range resolves to the highest
+  matching version in your local repository, and relocated artifacts are followed to their new coordinates.
+- **Copy Dependency Tree** (right-click a module) copies its tree in the format of `mvn dependency:tree`, including
+  omitted dependencies while they are shown.
 - **Libraries** view: every library, with the modules that use it and how each module gets it.
 - A details pane explains the selected node: where a dependency is declared, the path it comes in through, why a
   version was left out, and which versions are in your local repository.
@@ -109,8 +119,8 @@ To release a new version:
 
 ## Limitations
 
-- Version ranges, relocations and file-based profile activation are not evaluated. Profiles are activated by
-  `activeByDefault`, OS, JDK and property conditions.
+- File-based profile activation is not evaluated. Profiles are activated by `activeByDefault`, OS, JDK and property
+  conditions. Version ranges only consider the versions in your local repository.
 - Artifacts whose POM is not in your local repository are reported as missing, and their dependencies are unknown.
   Run a Maven build once to fill `~/.m2`.
 - The analysis reads saved files, so editor highlights and hints appear once a POM is saved.

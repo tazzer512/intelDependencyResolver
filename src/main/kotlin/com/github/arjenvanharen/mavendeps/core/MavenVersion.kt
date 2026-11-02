@@ -82,3 +82,55 @@ class MavenVersion(val text: String) : Comparable<MavenVersion> {
         val COMPARATOR: Comparator<String> = Comparator { a, b -> MavenVersion(a).compareTo(MavenVersion(b)) }
     }
 }
+
+/**
+ * A Maven version range such as `[1.0,2.0)`, `[1.5,)`, `(,1.0]`, `[1.2]` or a union `[1,2),[3,4)`. Soft requirements
+ * (a plain version) are not ranges; [parse] returns null for them.
+ */
+class VersionRange private constructor(private val parts: List<Part>) {
+    private class Part(val low: MavenVersion?, val lowInclusive: Boolean, val high: MavenVersion?, val highInclusive: Boolean) {
+        fun contains(v: MavenVersion): Boolean {
+            if (low != null && (if (lowInclusive) v < low else v <= low)) return false
+            if (high != null && (if (highInclusive) v > high else v >= high)) return false
+            return true
+        }
+    }
+
+    fun contains(version: String): Boolean = MavenVersion(version).let { v -> parts.any { it.contains(v) } }
+
+    /** The highest of [versions] inside the range, or null. */
+    fun highest(versions: Collection<String>): String? = versions.filter { contains(it) }.maxWithOrNull(MavenVersion.COMPARATOR)
+
+    companion object {
+        fun isRange(spec: String): Boolean = spec.trim().let { it.startsWith("[") || it.startsWith("(") }
+
+        fun parse(spec: String): VersionRange? {
+            val text = spec.trim()
+            if (!isRange(text) || text.length > 1_000) return null
+            val parts = ArrayList<Part>()
+            var rest = text
+            while (rest.isNotEmpty()) {
+                val open = rest[0]
+                if (open != '[' && open != '(') return null
+                val close = rest.indexOfFirst { it == ']' || it == ')' }
+                if (close < 0) return null
+                val body = rest.substring(1, close)
+                val lowInclusive = open == '['
+                val highInclusive = rest[close] == ']'
+                if (',' !in body) {
+                    // [1.2] means exactly 1.2; (1.2) is invalid.
+                    if (!lowInclusive || !highInclusive || body.isBlank()) return null
+                    val v = MavenVersion(body.trim())
+                    parts += Part(v, true, v, true)
+                } else {
+                    val (lo, hi) = body.split(',', limit = 2).map { it.trim() }
+                    if (',' in hi) return null
+                    parts += Part(lo.takeIf { it.isNotEmpty() }?.let(::MavenVersion), lowInclusive, hi.takeIf { it.isNotEmpty() }?.let(::MavenVersion), highInclusive)
+                }
+                rest = rest.substring(close + 1).trimStart()
+                if (rest.startsWith(",")) rest = rest.substring(1).trimStart()
+            }
+            return VersionRange(parts).takeIf { parts.isNotEmpty() }
+        }
+    }
+}

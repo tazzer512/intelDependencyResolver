@@ -150,6 +150,10 @@ class DependencyNode(
     val exclusions: List<String>,
     /** Version forced by the module's dependency management instead of the declared one. */
     val managedFrom: String?,
+    /** The version range this node's version was chosen from (highest match in the local repository). */
+    val requestedRange: String? = null,
+    /** `groupId:artifactId:version` this node was relocated from (`<distributionManagement><relocation>`). */
+    val relocatedFrom: String? = null,
 ) {
     val depth: Int = (parent?.depth ?: 0) + 1
     val children = ArrayList<DependencyNode>()
@@ -189,7 +193,8 @@ class DependencyTree(val module: Path, val roots: List<DependencyNode>, val miss
  * Builds effective models and dependency trees the way Maven 3 does in its common cases: inheritance, property
  * interpolation, dependency management with BOM imports, scope propagation, optional dependencies, exclusions and
  * nearest-wins conflict resolution. Profiles are activated by `activeByDefault`, `os`, `jdk` and `property`
- * conditions (see [ActivationContext]); version ranges, relocations and file-based activation are not evaluated.
+ * conditions (see [ActivationContext]); file-based activation is not evaluated. A version range resolves to the highest
+ * matching version in the local repository, and relocations are followed.
  * Instances cache effective models and are meant to be used for one query over one [Workspace].
  */
 class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, private val env: ActivationContext = ActivationContext.current()) {
@@ -344,7 +349,7 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
         val root = effective(module)
         val missing = LinkedHashSet<String>()
         val winners = HashMap<String, DependencyNode>()
-        val roots = root.dependencies.map { DependencyNode(it, it.version, it.scope, null, it.exclusions, null) }
+        val roots = root.dependencies.map { node(it, it.version, it.scope, null, it.exclusions, null) }
         val queue = ArrayDeque(roots)
         var count = 0
         while (queue.isNotEmpty() && count++ < maxNodes) {
@@ -376,7 +381,7 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
                 }
                 val md = root.managed[dep.key]
                 val managedVersion = md?.version?.takeIf { it != dep.version }
-                val child = DependencyNode(
+                val child = node(
                     dep, managedVersion ?: dep.version, md?.scope?.takeIf { node.scope == "compile" } ?: scope, node,
                     (node.exclusions + dep.exclusions).distinct(), if (managedVersion != null) dep.version else null,
                 )
@@ -387,9 +392,42 @@ class DependencyResolver(val ws: Workspace, private val repo: LocalRepository, p
         return DependencyTree(module, roots, missing)
     }
 
+    /**
+     * A tree node, with a version range resolved to the highest matching local version and relocations followed (both
+     * before mediation, as in Maven, so the node competes under its final coordinates).
+     */
+    private fun node(dep: EffectiveDependency, version: String?, scope: String, parent: DependencyNode?, exclusions: List<String>, managedFrom: String?): DependencyNode {
+        var d = dep
+        var v = version
+        var range: String? = null
+        if (v != null && VersionRange.isRange(v)) {
+            range = v
+            // No match: keep the range, so the node is reported as missing rather than silently dropped.
+            v = VersionRange.parse(v)?.highest(repo.versions(d.groupId, d.artifactId)) ?: v
+        }
+        var relocatedFrom: String? = null
+        val seen = HashSet<String>()
+        while (v != null && seen.size < MAX_RELOCATIONS && seen.add("${d.groupId}:${d.artifactId}:$v")) {
+            // Only repository POMs relocate; a workspace module is what it says it is.
+            if (byGav["${d.groupId}:${d.artifactId}:$v"] != null) break
+            val to = repo.pom(d.groupId, d.artifactId, v)?.relocation ?: break
+            val g = to.groupId?.takeIf { it.isNotBlank() } ?: d.groupId
+            val a = to.artifactId?.takeIf { it.isNotBlank() } ?: d.artifactId
+            val nv = to.version?.takeIf { it.isNotBlank() } ?: v
+            if (g == d.groupId && a == d.artifactId && nv == v) break
+            if (relocatedFrom == null) relocatedFrom = "${d.groupId}:${d.artifactId}:$v"
+            d = d.copy(groupId = g, artifactId = a, version = nv)
+            v = nv
+        }
+        return DependencyNode(d, v, scope, parent, exclusions, managedFrom, range, relocatedFrom)
+    }
+
     companion object {
         /** Far deeper than real BOM hierarchies (Spring Boot nests three or four). */
         const val MAX_IMPORT_DEPTH = 32
+
+        /** Relocation chains are one or two hops in practice. */
+        const val MAX_RELOCATIONS = 8
     }
 
     private fun matches(pattern: String, dep: EffectiveDependency): Boolean {

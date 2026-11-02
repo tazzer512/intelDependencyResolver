@@ -17,6 +17,8 @@ enum class Category(val displayName: String) {
     MULTI_MODULE("Multi-module"),
     PROPERTIES("Properties"),
     SUGGESTIONS("Suggestions"),
+    BUILD("Build plugins"),
+    DEPENDENCIES("Dependencies"),
 }
 
 data class Problem(
@@ -59,6 +61,8 @@ data class Dependency(
     val optional: Boolean = false,
     /** Excluded `groupId:artifactId` patterns (`*` allowed). */
     val exclusions: List<String> = emptyList(),
+    /** Position of the `<version>` element, [Pos.NONE] when there is none. */
+    val versionPos: Pos = Pos.NONE,
 ) {
     /** Maven's management key: `groupId:artifactId:type[:classifier]`. */
     fun managementKey(resolve: (String?) -> String? = { it }): String {
@@ -81,6 +85,25 @@ data class Activation(
     val propertyValue: String? = null,
 )
 
+/**
+ * A `<plugin>` in `<build><plugins>` or (with [managed]) `<build><pluginManagement><plugins>`. [groupId] is null when
+ * omitted, which means `org.apache.maven.plugins`.
+ */
+data class Plugin(
+    val groupId: String?,
+    val artifactId: String?,
+    val version: String?,
+    val managed: Boolean,
+    val profile: String?,
+    val pos: Pos,
+) {
+    val effectiveGroupId: String get() = groupId ?: DEFAULT_GROUP
+
+    companion object {
+        const val DEFAULT_GROUP = "org.apache.maven.plugins"
+    }
+}
+
 data class Profile(val id: String, val activation: Activation, val properties: Map<String, String>)
 
 /** A `${name}` reference. [critical] references affect the project model (coordinates, dependencies, ...). */
@@ -101,6 +124,9 @@ data class PomModel(
     val dependencies: List<Dependency>,
     val propertyRefs: List<PropertyRef>,
     val profiles: List<Profile> = emptyList(),
+    val plugins: List<Plugin> = emptyList(),
+    /** `<distributionManagement><relocation>`: missing parts mean "unchanged". */
+    val relocation: Gav? = null,
 ) {
     /** Coordinates with groupId/version inherited from the parent declaration when missing. */
     val effectiveGav: Gav

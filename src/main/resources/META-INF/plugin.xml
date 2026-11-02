@@ -7,12 +7,14 @@
         <ul>
             <li>Parses the whole module tree once and caches the result on disk.</li>
             <li>Only re-parses changed POMs and re-validates the modules affected by them.</li>
-            <li>Validation: XML syntax, POM structure, multi-module consistency and property references.</li>
+            <li>Validation: XML syntax, POM structure, multi-module consistency, property references, build plugin
+                versions, dependencies on workspace modules with a stale version, and snapshots in releases.</li>
             <li>Quick fixes for most problems, and suggestions to extract repeated versions into a property.</li>
             <li>Find a dependency in all POMs and in the resolved transitive dependency trees (local repository).</li>
             <li>Update a dependency version in every POM, excluding transitive copies with another version.</li>
-            <li>Explorer: browse modules with their resolved dependency trees, or every library with the modules that use it
-                and its version conflicts; open any POM from there.</li>
+            <li>Explorer: browse modules with their resolved dependency trees (version ranges and relocations included), or
+                every library with the modules that use it and its version conflicts; open any POM from there, or copy a
+                tree in mvn dependency:tree format.</li>
             <li>Paste a &lt;dependency&gt; snippet or coordinates to fill in the search fields.</li>
             <li>Problems and quick fixes right in the pom.xml editor, and inlay hints with the effective version of managed
                 and property versions, plus newer versions already in the local repository.</li>
